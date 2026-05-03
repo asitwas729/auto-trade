@@ -226,10 +226,15 @@ API_RETRY_DELAY_SEC = 1.0
 API_TIMEOUT_SEC = 10
 
 # ─── KIS API 레이트리밋 (req/s) ───────────────────────────────────
-# 모의투자: 공식 한도 약 2req/s, 안전 마진 두고 1.8
+# 모의투자: 공식 2req/s지만 실측상 1req/s가 안정적 → 0.9로 보수 설정
 # 실전투자: 공식 한도 약 20req/s, 안전 마진 두고 18
-KIS_RATE_LIMIT_QPS_MOCK = 1.8
+KIS_RATE_LIMIT_QPS_MOCK = 0.9
 KIS_RATE_LIMIT_QPS_REAL = 18.0
+
+# EGW00201(초당 한도 초과) 감지 시 페널티 추가 대기시간(초)
+# 다음 호출 간격에 더해져서 점진 감쇠 (×0.5)
+KIS_RATE_LIMIT_PENALTY_SEC = 2.0
+KIS_RATE_LIMIT_PENALTY_MAX = 10.0
 
 # ─── 기타 ─────────────────────────────────────────────────────────
 KOSPI_CODE = "0001"

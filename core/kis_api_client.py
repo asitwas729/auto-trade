@@ -38,6 +38,8 @@ from config.constants import (
     KIS_PATH_PRICE,
     KIS_PATH_TOKEN,
     KIS_PATH_UNFILLED,
+    KIS_RATE_LIMIT_PENALTY_MAX,
+    KIS_RATE_LIMIT_PENALTY_SEC,
     KIS_RATE_LIMIT_QPS_MOCK,
     KIS_RATE_LIMIT_QPS_REAL,
     KIS_TR,
@@ -173,6 +175,12 @@ class KISApiClient:
         )
         self._rate_limit_lock = threading.Lock()
         self._last_request_at = 0.0
+        self._rate_limit_penalty = 0.0  # EGW00201 적응형 페널티
+
+        # 토큰 디스크 캐시 (재시작 시 재발급 방지 - EGW00133 분당 1회 제한 회피)
+        self._token_cache_path = (
+            settings.DATA_DIR / f".kis_token_{self._mode}.json"
+        )
 
         logger.info(
             f"KISApiClient 초기화 | 모드={self._mode} | "
@@ -185,13 +193,58 @@ class KISApiClient:
 
     def init(self) -> None:
         """토큰 발급 및 WebSocket 승인키 획득"""
-        self._issue_token()
+        # 디스크 캐시에서 우선 로드 (EGW00133 회피)
+        if not self._load_cached_token():
+            self._issue_token()
         self._get_ws_approval_key()
         logger.info("KISApiClient 초기화 완료")
 
     # ─────────────────────────────────────────────────────────────
     # 토큰 관리
     # ─────────────────────────────────────────────────────────────
+
+    def _load_cached_token(self) -> bool:
+        """디스크 캐시 토큰 로드. 유효하면 True 반환."""
+        try:
+            if not self._token_cache_path.exists():
+                return False
+            with open(self._token_cache_path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            expires_at = datetime.fromisoformat(cached["expires_at"])
+            token = TokenInfo(
+                access_token=cached["access_token"],
+                token_type=cached.get("token_type", "Bearer"),
+                expires_at=expires_at,
+            )
+            if token.is_expired():
+                logger.info("캐시된 토큰 만료 - 신규 발급 필요")
+                return False
+            with self._token_lock:
+                self._token = token
+            logger.info(
+                f"캐시된 Access Token 사용 | 만료: {expires_at:%Y-%m-%d %H:%M:%S}"
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"토큰 캐시 로드 실패: {exc}")
+            return False
+
+    def _save_cached_token(self) -> None:
+        """발급/갱신된 토큰을 디스크에 저장."""
+        try:
+            self._token_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._token_lock:
+                if self._token is None:
+                    return
+                payload = {
+                    "access_token": self._token.access_token,
+                    "token_type": self._token.token_type,
+                    "expires_at": self._token.expires_at.isoformat(),
+                }
+            with open(self._token_cache_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+        except Exception as exc:
+            logger.warning(f"토큰 캐시 저장 실패: {exc}")
 
     def _issue_token(self) -> None:
         url = f"{self._base_url}{KIS_PATH_TOKEN}"
@@ -205,8 +258,17 @@ class KISApiClient:
         if not resp.ok:
             try:
                 err_body = resp.json()
+                err_code = err_body.get("error_code", "") if isinstance(err_body, dict) else ""
             except Exception:
                 err_body = resp.text[:300]
+                err_code = ""
+            # EGW00133: 분당 1회 제한 - 명확한 안내
+            if err_code == "EGW00133":
+                raise RuntimeError(
+                    f"토큰 발급 분당 1회 제한 (EGW00133): {err_body}\n"
+                    f"  → 1분 후 재시도하세요. 또는 이미 발급된 토큰이 "
+                    f"{self._token_cache_path}에 캐시되어야 합니다."
+                )
             raise RuntimeError(
                 f"토큰 발급 실패 HTTP {resp.status_code}: {err_body}\n"
                 f"  서버: {url}\n"
@@ -222,12 +284,15 @@ class KISApiClient:
                 expires_at=expires_at,
             )
         logger.info(f"Access Token 발급 완료 | 만료: {expires_at:%Y-%m-%d %H:%M:%S}")
+        self._save_cached_token()
 
     def _ensure_token(self) -> str:
         with self._token_lock:
-            if self._token is None or self._token.is_expired():
-                logger.info("Access Token 갱신 중...")
-                self._issue_token()
+            needs_refresh = self._token is None or self._token.is_expired()
+        if needs_refresh:
+            logger.info("Access Token 갱신 중...")
+            self._issue_token()
+        with self._token_lock:
             return self._token.access_token
 
     def _get_ws_approval_key(self) -> None:
@@ -260,14 +325,30 @@ class KISApiClient:
         return h
 
     def _throttle(self) -> None:
-        """글로벌 요청 간격 강제 (KIS 초당 한도 준수, 멀티스레드 안전)"""
+        """글로벌 요청 간격 강제 + EGW00201 적응형 페널티 (멀티스레드 안전)"""
         min_interval = 1.0 / self._rate_limit_qps
         with self._rate_limit_lock:
             now = time.monotonic()
-            wait = self._last_request_at + min_interval - now
+            wait = self._last_request_at + min_interval + self._rate_limit_penalty - now
             if wait > 0:
+                # 락 잡은 채 sleep해야 다른 스레드 동시 통과 방지
                 time.sleep(wait)
+            # 페널티는 호출 통과할 때마다 절반으로 감쇠
+            self._rate_limit_penalty *= 0.5
+            if self._rate_limit_penalty < 0.05:
+                self._rate_limit_penalty = 0.0
             self._last_request_at = time.monotonic()
+
+    def _add_rate_limit_penalty(self) -> None:
+        """EGW00201 발생 시 다음 호출 간격을 늘려 KIS 서버를 진정시킴"""
+        with self._rate_limit_lock:
+            self._rate_limit_penalty = min(
+                self._rate_limit_penalty + KIS_RATE_LIMIT_PENALTY_SEC,
+                KIS_RATE_LIMIT_PENALTY_MAX,
+            )
+        logger.warning(
+            f"레이트리밋 페널티 추가 → 현재 +{self._rate_limit_penalty:.1f}s"
+        )
 
     @staticmethod
     def _parse_kis_error(exc: requests.HTTPError) -> tuple[str, str]:
@@ -295,6 +376,7 @@ class KISApiClient:
                 return data
             except RateLimitError as exc:
                 last_exc = exc
+                self._add_rate_limit_penalty()
                 backoff = min(2 ** (attempt - 1), 8)
                 logger.warning(
                     f"GET {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
@@ -306,6 +388,7 @@ class KISApiClient:
                 msg_cd, kis_msg = self._parse_kis_error(exc)
                 # KIS는 EGW00201(초당 한도 초과)을 HTTP 500으로 내려줌
                 if msg_cd == "EGW00201":
+                    self._add_rate_limit_penalty()
                     backoff = min(2 ** (attempt - 1), 8)
                     logger.warning(
                         f"GET {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
@@ -348,6 +431,7 @@ class KISApiClient:
                 return data
             except RateLimitError as exc:
                 last_exc = exc
+                self._add_rate_limit_penalty()
                 # 주문은 재시도 금지 (이중 주문 방지)
                 if is_order:
                     logger.error(f"POST {path} 초당 한도 초과 - 주문 재시도 금지")
@@ -361,7 +445,11 @@ class KISApiClient:
             except requests.HTTPError as exc:
                 last_exc = exc
                 msg_cd, kis_msg = self._parse_kis_error(exc)
-                if msg_cd == "EGW00201" and not is_order:
+                if msg_cd == "EGW00201":
+                    self._add_rate_limit_penalty()
+                    if is_order:
+                        logger.error(f"POST {path} 초당 한도 초과 - 주문 재시도 금지")
+                        break
                     backoff = min(2 ** (attempt - 1), 8)
                     logger.warning(
                         f"POST {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
