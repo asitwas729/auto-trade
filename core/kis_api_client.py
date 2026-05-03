@@ -38,6 +38,8 @@ from config.constants import (
     KIS_PATH_PRICE,
     KIS_PATH_TOKEN,
     KIS_PATH_UNFILLED,
+    KIS_RATE_LIMIT_QPS_MOCK,
+    KIS_RATE_LIMIT_QPS_REAL,
     KIS_TR,
     KIS_WS_URL_MOCK,
     KIS_WS_URL_REAL,
@@ -165,7 +167,17 @@ class KISApiClient:
         self._api_error = False
         self._last_error_time: Optional[datetime] = None
 
-        logger.info(f"KISApiClient 초기화 | 모드={self._mode}")
+        # 글로벌 레이트리밋 (KIS 초당 거래건수 한도 준수)
+        self._rate_limit_qps = (
+            KIS_RATE_LIMIT_QPS_MOCK if self._is_mock else KIS_RATE_LIMIT_QPS_REAL
+        )
+        self._rate_limit_lock = threading.Lock()
+        self._last_request_at = 0.0
+
+        logger.info(
+            f"KISApiClient 초기화 | 모드={self._mode} | "
+            f"rate_limit={self._rate_limit_qps}req/s"
+        )
 
     # ─────────────────────────────────────────────────────────────
     # 초기화
@@ -247,12 +259,32 @@ class KISApiClient:
             h.update(extra)
         return h
 
+    def _throttle(self) -> None:
+        """글로벌 요청 간격 강제 (KIS 초당 한도 준수, 멀티스레드 안전)"""
+        min_interval = 1.0 / self._rate_limit_qps
+        with self._rate_limit_lock:
+            now = time.monotonic()
+            wait = self._last_request_at + min_interval - now
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request_at = time.monotonic()
+
+    @staticmethod
+    def _parse_kis_error(exc: requests.HTTPError) -> tuple[str, str]:
+        """HTTP 에러 응답에서 (msg_cd, msg1) 추출"""
+        try:
+            body = exc.response.json()
+            return body.get("msg_cd", ""), (body.get("msg1") or body.get("message") or "")
+        except Exception:
+            return "", (exc.response.text[:200] if exc.response is not None else "")
+
     def _get(self, path: str, tr_id: str, params: dict) -> dict:
         url = f"{self._base_url}{path}"
         headers = self._headers(tr_id)
         last_exc = None
         for attempt in range(1, API_MAX_RETRY + 1):
             try:
+                self._throttle()
                 resp = requests.get(
                     url, headers=headers, params=params, timeout=API_TIMEOUT_SEC
                 )
@@ -263,18 +295,24 @@ class KISApiClient:
                 return data
             except RateLimitError as exc:
                 last_exc = exc
-                logger.warning(f"GET {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - 1초 대기")
+                backoff = min(2 ** (attempt - 1), 8)
+                logger.warning(
+                    f"GET {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
+                )
                 if attempt < API_MAX_RETRY:
-                    time.sleep(1.0)
+                    time.sleep(backoff)
             except requests.HTTPError as exc:
                 last_exc = exc
-                try:
-                    body    = exc.response.json()
-                    msg_cd  = body.get("msg_cd", "")
-                    kis_msg = body.get("msg1") or body.get("message") or str(body)
-                except Exception:
-                    msg_cd  = ""
-                    kis_msg = exc.response.text[:200] if exc.response else ""
+                msg_cd, kis_msg = self._parse_kis_error(exc)
+                # KIS는 EGW00201(초당 한도 초과)을 HTTP 500으로 내려줌
+                if msg_cd == "EGW00201":
+                    backoff = min(2 ** (attempt - 1), 8)
+                    logger.warning(
+                        f"GET {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
+                    )
+                    if attempt < API_MAX_RETRY:
+                        time.sleep(backoff)
+                    continue
                 logger.warning(
                     f"GET {path} 실패 ({attempt}/{API_MAX_RETRY}) "
                     f"HTTP {exc.response.status_code} [{msg_cd}]: {kis_msg}"
@@ -295,9 +333,11 @@ class KISApiClient:
         if hash_key:
             extra["hashkey"] = self._make_hashkey(body)
         headers = self._headers(tr_id, extra)
+        is_order = "order" in path.lower()
         last_exc = None
         for attempt in range(1, API_MAX_RETRY + 1):
             try:
+                self._throttle()
                 resp = requests.post(
                     url, headers=headers, json=body, timeout=API_TIMEOUT_SEC
                 )
@@ -306,11 +346,42 @@ class KISApiClient:
                 self._check_api_response(data)
                 self._api_error = False
                 return data
+            except RateLimitError as exc:
+                last_exc = exc
+                # 주문은 재시도 금지 (이중 주문 방지)
+                if is_order:
+                    logger.error(f"POST {path} 초당 한도 초과 - 주문 재시도 금지")
+                    break
+                backoff = min(2 ** (attempt - 1), 8)
+                logger.warning(
+                    f"POST {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
+                )
+                if attempt < API_MAX_RETRY:
+                    time.sleep(backoff)
+            except requests.HTTPError as exc:
+                last_exc = exc
+                msg_cd, kis_msg = self._parse_kis_error(exc)
+                if msg_cd == "EGW00201" and not is_order:
+                    backoff = min(2 ** (attempt - 1), 8)
+                    logger.warning(
+                        f"POST {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
+                    )
+                    if attempt < API_MAX_RETRY:
+                        time.sleep(backoff)
+                    continue
+                logger.warning(
+                    f"POST {path} 실패 ({attempt}/{API_MAX_RETRY}) "
+                    f"HTTP {exc.response.status_code} [{msg_cd}]: {kis_msg}"
+                )
+                if is_order:
+                    logger.error("주문 API 재시도 금지 - 이중 주문 위험")
+                    break
+                if attempt < API_MAX_RETRY:
+                    time.sleep(API_RETRY_DELAY_SEC * attempt)
             except Exception as exc:
                 last_exc = exc
                 logger.warning(f"POST {path} 실패 ({attempt}/{API_MAX_RETRY}): {exc}")
-                # 주문 API는 재시도 금지 (이중 주문 방지)
-                if "order" in path.lower():
+                if is_order:
                     logger.error("주문 API 재시도 금지 - 이중 주문 위험")
                     break
                 if attempt < API_MAX_RETRY:

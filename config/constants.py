@@ -225,6 +225,12 @@ API_MAX_RETRY = 3
 API_RETRY_DELAY_SEC = 1.0
 API_TIMEOUT_SEC = 10
 
+# ─── KIS API 레이트리밋 (req/s) ───────────────────────────────────
+# 모의투자: 공식 한도 약 2req/s, 안전 마진 두고 1.8
+# 실전투자: 공식 한도 약 20req/s, 안전 마진 두고 18
+KIS_RATE_LIMIT_QPS_MOCK = 1.8
+KIS_RATE_LIMIT_QPS_REAL = 18.0
+
 # ─── 기타 ─────────────────────────────────────────────────────────
 KOSPI_CODE = "0001"
 KOSDAQ_CODE = "1001"
