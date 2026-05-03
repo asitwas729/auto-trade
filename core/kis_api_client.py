@@ -958,6 +958,24 @@ class KISApiClient:
         except Exception as exc:
             logger.warning(f"실시간 데이터 파싱 오류: {exc}")
 
+    @staticmethod
+    def _to_int(s: str, default: int = 0) -> int:
+        """KIS 실시간 필드 안전 정수 변환 (장전/시간외에 '0.00' 같은 소수 문자열로 올 수 있음)"""
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            try:
+                return int(float(s))
+            except (ValueError, TypeError):
+                return default
+
+    @staticmethod
+    def _to_float(s: str, default: float = 0.0) -> float:
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return default
+
     def _parse_price_data(self, data_str: str) -> None:
         """H0STCNT0 체결가 파싱 (^구분자)"""
         fields = data_str.split("^")
@@ -966,15 +984,15 @@ class KISApiClient:
         code = fields[0]
         parsed = {
             "code": code,
-            "current_price": int(fields[2]),
+            "current_price": self._to_int(fields[2]),
             "change_sign": fields[3],           # 1=상한, 2=상승, 3=보합, 4=하한, 5=하락
-            "change_price": int(fields[4]),
-            "change_rate": float(fields[5]),
-            "volume": int(fields[8]),
-            "total_volume": int(fields[9]),
-            "high": int(fields[6]),
-            "low": int(fields[7]),
-            "open": int(fields[10]),
+            "change_price": self._to_int(fields[4]),
+            "change_rate": self._to_float(fields[5]),
+            "volume": self._to_int(fields[8]),
+            "total_volume": self._to_int(fields[9]),
+            "high": self._to_int(fields[6]),
+            "low": self._to_int(fields[7]),
+            "open": self._to_int(fields[10]),
             "timestamp": fields[1],
         }
         if hasattr(self, "_realtime_price_cb") and self._realtime_price_cb:
