@@ -164,6 +164,7 @@ class KISApiClient:
         self._ws_connected = threading.Event()
         self._ws_subscriptions: dict[str, Callable] = {}  # key → callback
         self._ws_approval_key: Optional[str] = None
+        self._subscribed_codes: set[str] = set()  # 현재 구독 중인 종목코드
 
         # API 오류 감지 플래그
         self._api_error = False
@@ -871,13 +872,36 @@ class KISApiClient:
         on_orderbook: Callable[[str, dict], None] | None = None,
     ) -> None:
         """
-        실시간 체결가 (+ 선택적으로 호가) 구독 시작
-        on_price(code, data): 체결가 콜백
-        on_orderbook(code, data): 호가 콜백 (선택)
+        실시간 체결가 (+ 선택적으로 호가) 구독 시작.
+
+        이미 WebSocket이 연결돼 있으면 신규 종목만 추가 구독한다
+        (KIS는 동일 approval_key 중복 연결을 강제 종료하므로 절대 새 WS를 열면 안 됨).
         """
         self._realtime_price_cb = on_price
         self._realtime_orderbook_cb = on_orderbook
-        self._realtime_codes = codes
+
+        # 기존 연결 살아있으면 신규 종목만 추가 구독
+        if (
+            self._ws is not None
+            and self._ws_thread is not None
+            and self._ws_thread.is_alive()
+            and self._ws_connected.is_set()
+        ):
+            new_codes = [c for c in codes if c not in self._subscribed_codes]
+            if not new_codes:
+                logger.debug(f"실시간 구독 변경 없음 (이미 구독 중): {codes}")
+                return
+            for code in new_codes:
+                self._send_subscribe(code, self._tr["ws_real_price"])
+                if on_orderbook:
+                    self._send_subscribe(code, self._tr["ws_orderbook"])
+                self._subscribed_codes.add(code)
+            logger.info(f"실시간 구독 추가: {new_codes}")
+            return
+
+        # 신규 연결
+        self._realtime_codes = list(codes)
+        self._subscribed_codes = set()
 
         self._ws = websocket.WebSocketApp(
             self._ws_url,
@@ -908,6 +932,7 @@ class KISApiClient:
             self._send_subscribe(code, self._tr["ws_real_price"])
             if self._realtime_orderbook_cb:
                 self._send_subscribe(code, self._tr["ws_orderbook"])
+            self._subscribed_codes.add(code)
 
     def _send_subscribe(self, code: str, tr_id: str) -> None:
         payload = {
@@ -1016,3 +1041,4 @@ class KISApiClient:
     def _on_ws_close(self, ws, close_status_code, close_msg) -> None:
         logger.warning(f"WebSocket 연결 종료: {close_status_code} {close_msg}")
         self._ws_connected.clear()
+        self._subscribed_codes.clear()
