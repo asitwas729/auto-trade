@@ -285,10 +285,12 @@ class AutoTrader:
                 f"| 포지션={len(balance.positions)}개"
             )
             for p in balance.positions:
+                # KIS evlu_pfls_rt 는 이미 %단위(0.84 = 0.84%) 라서
+                # f-string의 :% (×100)을 사용하지 않고 :+.2f 로 그대로 표시
                 logger.info(
                     f"  보유: {p.name}({p.code}) {p.quantity}주 "
                     f"@평단{p.avg_price:,.0f}원 (현재 {p.current_price:,}원, "
-                    f"손익 {p.profit_loss_rate:+.2%})"
+                    f"손익 {p.profit_loss_rate:+.2f}%)"
                 )
         except Exception as exc:
             logger.error(f"잔고 동기화 실패: {exc}")

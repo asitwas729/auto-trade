@@ -34,6 +34,7 @@ from config.constants import (
     KIS_PATH_MINUTE_PRICE,
     KIS_PATH_ORDER_BUY,
     KIS_PATH_ORDER_CANCEL,
+    KIS_PATH_ORDER_SELL,
     KIS_PATH_ORDERBOOK,
     KIS_PATH_PRICE,
     KIS_PATH_TOKEN,
@@ -792,15 +793,26 @@ class KISApiClient:
             )
 
         summary = data.get("output2", [{}])[0]
-        # 현금: 예수금총금액(dnca_tot_amt)이 KIS 공식 가용 현금 필드.
-        # ord_psbl_cash는 표준 응답에 없어 항상 0이었던 버그 수정.
-        # 일부 시점/계좌에 따라 prvs_rcdl_excc_amt(가수도정산), nxdy_excc_amt(익일정산)에
-        # 잔액이 있을 수 있어 max로 폴백.
-        cash = max(
-            int(summary.get("dnca_tot_amt", 0) or 0),
-            int(summary.get("prvs_rcdl_excc_amt", 0) or 0),
-            int(summary.get("nxdy_excc_amt", 0) or 0),
-        )
+        # 가용 현금 산정 우선순위:
+        #   1) ord_psbl_cash (주문가능현금) — 일부 응답에 포함, 가장 정확
+        #   2) prvs_rcdl_excc_amt (T+2 정산금액) — 정산 후 가용
+        #   3) dnca_tot_amt - thdt_buy_amt + thdt_sll_amt — 예수금에서 당일
+        #      매수/매도 차감 후 (모의 마진 매수 반영)
+        # 모의투자는 dnca_tot_amt가 시작자본 그대로 유지되는 경우가 있어
+        # 그것만 보면 과대 추정됨.
+        ord_psbl = int(summary.get("ord_psbl_cash", 0) or 0)
+        prvs_rcdl = int(summary.get("prvs_rcdl_excc_amt", 0) or 0)
+        dnca = int(summary.get("dnca_tot_amt", 0) or 0)
+        today_buy = int(summary.get("thdt_buy_amt", 0) or 0)
+        today_sell = int(summary.get("thdt_sll_amt", 0) or 0)
+
+        if ord_psbl > 0:
+            cash = ord_psbl
+        elif prvs_rcdl > 0:
+            cash = prvs_rcdl
+        else:
+            cash = max(0, dnca - today_buy + today_sell)
+
         return Balance(
             cash=cash,
             total_eval=int(summary.get("tot_evlu_amt", 0) or 0),
