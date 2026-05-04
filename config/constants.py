@@ -32,14 +32,15 @@ TICK_SIZE_TABLE = [
     (500_000, float("inf"), 1_000),
 ]
 
-# ─── 리스크 파라미터 ──────────────────────────────────────────────
-DAILY_LOSS_LIMIT_RATE = -0.02       # 일일 손실 한도 -2%
-WEEKLY_LOSS_LIMIT_RATE = -0.05      # 주간 손실 한도 -5%
-WEEKLY_PAUSE_DAYS = 3               # 주간 손실 한도 도달 시 매매 중단 일수
-CONSECUTIVE_LOSS_LIMIT = 3          # 연속 손실 허용 횟수
-MAX_POSITION_RATIO = 0.20           # 종목당 최대 비중 20%
+# ─── 리스크 파라미터 (모의투자 공격형) ───────────────────────────
+# 실거래 전환 시 반드시 보수값으로 복원 필요
+DAILY_LOSS_LIMIT_RATE = -0.05       # -2% → -5%
+WEEKLY_LOSS_LIMIT_RATE = -0.15      # -5% → -15%
+WEEKLY_PAUSE_DAYS = 1               # 3 → 1 (빠른 복귀)
+CONSECUTIVE_LOSS_LIMIT = 10         # 3 → 10 (연속손실 허용 확대)
+MAX_POSITION_RATIO = 0.30           # 0.20 → 0.30 (종목 집중도 ↑)
 MAX_ORDER_AMOUNT = 10_000_000       # 1회 주문 최대 금액 1천만원
-MIN_CASH_RATIO = 0.10               # 최소 현금 비중 10%
+MIN_CASH_RATIO = 0.05               # 0.10 → 0.05 (현금 비중 축소)
 UNFILLED_ORDER_TIMEOUT_SEC = 300    # 미체결 주문 자동 취소 (5분)
 
 # ─── 전략 기본 비중 ───────────────────────────────────────────────
@@ -56,12 +57,12 @@ REBALANCE_LOOKBACK_TRADES = 20      # 최근 N 트레이드 기준
 
 # ─── 전략별 파라미터 ──────────────────────────────────────────────
 S1_PARAMS = {
-    "entry_after": "091500",
-    "profit_target_1": 0.01,        # +1% → 50% 매도
-    "profit_target_2": 0.02,        # +2% → 전량 매도
-    "stop_loss_low": True,          # 당일 저가 이탈 시 손절
-    "stop_loss_rate": -0.015,       # -1.5% 손절 (중간값)
-    "intraday_close": True,         # 당일 청산 원칙
+    "entry_after": "090500",        # 09:15 → 09:05 (장 시작 직후)
+    "profit_target_1": 0.005,       # +1% → +0.5% (빠른 1차 익절)
+    "profit_target_2": 0.012,       # +2% → +1.2%
+    "stop_loss_low": True,
+    "stop_loss_rate": -0.025,       # -1.5% → -2.5% (드로다운 허용)
+    "intraday_close": True,
 }
 
 S2_PARAMS = {
@@ -89,16 +90,17 @@ S4_PARAMS = {
 }
 
 S5_PARAMS = {
-    "entry_time": "092000",         # 진입 허용 시각 09:20
-    "min_sector_score": 0.3,        # 섹터 뉴스 점수 최소값
-    "min_vol_ratio": 2.0,           # 5일 평균 대비 거래량 배수
-    "three_min_up_ratio": 0.6,      # 최근 3분봉 중 우상향 비율
-    "take_profit": 0.15,            # 익절 +15%
-    "stop_loss": -0.05,             # 손절 -5%
-    "overheat_rate": 0.20,          # 급등과열 기준 +20%
-    "weak_hold_days": 2,            # 수익 약함 판단 최소 보유일
-    "weak_min_profit": 0.03,        # 수익 약함 기준 최소 수익률
-    "position_ratio": 0.15,         # 1회 최대 투입 비중 15%
+    # 모의투자 공격형 (실거래 전 백테스트로 재검증 필수)
+    "entry_time": "091000",         # 09:20 → 09:10
+    "min_sector_score": 0.1,        # 0.3 → 0.1 (사실상 모든 섹터 통과)
+    "min_vol_ratio": 0.1,           # 2.0 → 0.1 (장중 누적 거래량 부정합 회피)
+    "three_min_up_ratio": 0.3,      # 0.6 → 0.3 (1/3 우상향만 요구)
+    "take_profit": 0.08,            # 0.15 → 0.08 (빠른 익절)
+    "stop_loss": -0.08,             # -0.05 → -0.08 (드로다운 허용)
+    "overheat_rate": 0.30,          # 0.20 → 0.30
+    "weak_hold_days": 5,            # 2 → 5
+    "weak_min_profit": 0.01,        # 0.03 → 0.01
+    "position_ratio": 0.30,         # 0.15 → 0.30 (1회 비중 ↑)
 }
 
 # ─── 섹터 키워드 (뉴스 매칭용) ───────────────────────────────────

@@ -76,14 +76,14 @@ class S1OpenVolatility(BaseStrategy):
     ) -> Optional[StrategySignal]:
         reasons = []
 
-        # 1. 당일 저점 형성 후 반등: 현재가가 저가보다 0.3% 이상 회복
-        if price < low * 1.003:
+        # 1. 당일 저점 회복 (모의 공격형: 어떤 반등이든 OK)
+        if price < low:
             return None
         bounce_pct = (price - low) / low
         reasons.append(f"저점반등{bounce_pct:.2%}")
 
-        # 2. 거래량 증가 (20일 평균 대비 1.5배 이상)
-        if vol_ratio < 1.5:
+        # 2. 거래량 증가 (모의 공격형: 0.1x 이상 = 사실상 통과)
+        if vol_ratio < 0.1:
             return None
         reasons.append(f"거래량{vol_ratio:.1f}x")
 
@@ -93,13 +93,14 @@ class S1OpenVolatility(BaseStrategy):
         reasons.append("MA5위")
 
         # 4. 호가 매수세 우세 (매수호가 수량 > 매도호가 수량 × 1.2)
+        # 모의 공격형 + 호가 미수신 시 자동 PASS
         if ask_qty_sum > 0 and bid_qty_sum < ask_qty_sum * 1.2:
             return None
         reasons.append("매수세우세")
 
-        # 5. 전일 종가 대비 급락 아님 (-5% 이내)
+        # 5. 전일 종가 대비 급락 아님 (모의 공격형: -15% 이내까지 허용)
         gap = (price - prev_close) / prev_close
-        if gap < -0.05:
+        if gap < -0.15:
             return None
 
         # 진입 기록
