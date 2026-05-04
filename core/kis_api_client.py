@@ -436,6 +436,8 @@ class KISApiClient:
         headers = self._headers(tr_id, extra)
         is_order = "order" in path.lower()
         last_exc = None
+        # 레이트리밋/일시적 거부는 5분 전체차단 대상이 아님 (개별 주문만 실패)
+        set_api_error_on_exit = True
         for attempt in range(1, API_MAX_RETRY + 1):
             try:
                 self._throttle()
@@ -455,9 +457,11 @@ class KISApiClient:
             except RateLimitError as exc:
                 last_exc = exc
                 self._add_rate_limit_penalty()
-                # 주문은 재시도 금지 (이중 주문 방지)
+                # 주문은 재시도 금지 (이중 주문 방지) + 레이트리밋은 일시적이므로
+                # 전체 차단(api_error) 안 함 — 다음 tick에서 재시도 가능
                 if is_order:
                     logger.error(f"POST {path} 초당 한도 초과 - 주문 재시도 금지")
+                    set_api_error_on_exit = False
                     break
                 backoff = min(2 ** (attempt - 1), 8)
                 logger.warning(
@@ -472,6 +476,7 @@ class KISApiClient:
                     self._add_rate_limit_penalty()
                     if is_order:
                         logger.error(f"POST {path} 초당 한도 초과 - 주문 재시도 금지")
+                        set_api_error_on_exit = False
                         break
                     backoff = min(2 ** (attempt - 1), 8)
                     logger.warning(
@@ -497,7 +502,8 @@ class KISApiClient:
                     break
                 if attempt < API_MAX_RETRY:
                     time.sleep(API_RETRY_DELAY_SEC * attempt)
-        self._set_api_error()
+        if set_api_error_on_exit:
+            self._set_api_error()
         raise RuntimeError(f"POST {path} 실패: {last_exc}") from last_exc
 
     def _check_api_response(self, data: dict) -> None:
