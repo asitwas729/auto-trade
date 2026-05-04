@@ -74,6 +74,7 @@ class AutoTrader:
         # S5 일봉 지표 캐시 {code: {"ma5": float, "vol_ma20": float, "prev_close": int}}
         self._daily_indicators: dict[str, dict] = {}
         self._last_strategy_tick = 0.0  # time.monotonic() 마지막 평가 시각
+        self._diag_tick_count = 0       # 진단 로그 주기 카운터 (10 tick = 5분)
 
         # 페이퍼 트레이딩 또는 실거래 주문 매니저
         if settings.is_paper:
@@ -185,6 +186,10 @@ class AutoTrader:
                             and time_str >= _S5_ENTRY_TIME
                         ):
                             self._evaluate_s5_watchlist(time_str)
+                        # 5분마다 워치리스트 상태 한 줄 진단
+                        self._diag_tick_count += 1
+                        if self._diag_tick_count % 10 == 0:
+                            self._log_eval_diagnostic(time_str)
 
                 # 장 마감 전 일일 리포트 (15:30)
                 if "153000" <= time_str <= "153100":
@@ -444,6 +449,36 @@ class AutoTrader:
                     self._handle_signal(signal, state)
             except Exception as exc:
                 logger.error("[main] %s S1 평가 오류: %s", code, exc, exc_info=True)
+
+    def _log_eval_diagnostic(self, time_str: str) -> None:
+        """5분마다 워치리스트 종목 상태를 INFO 로그로 출력 (진입 차단 원인 추적용)."""
+        watchlist = self._strategy.get_s5_watchlist()
+        if not watchlist:
+            logger.info("[진단] 워치리스트 비어있음")
+            return
+        for code in watchlist:
+            price = self._data.get_last_price(code)
+            today_bar = self._data.get_today_ohlcv(code) or {}
+            ind = self._daily_indicators.get(code, {})
+            ma5 = ind.get("ma5", 0)
+            vol_ma20 = ind.get("vol_ma20", 0)
+            prev_close = ind.get("prev_close", 0)
+            today_volume = today_bar.get("volume", 0)
+            vol_ratio = (today_volume / vol_ma20) if vol_ma20 > 0 else 0.0
+            change = (
+                (price - prev_close) / prev_close * 100
+                if (price and prev_close) else 0.0
+            )
+            ma5_status = (
+                "위" if (price and ma5 and price > ma5)
+                else ("아래" if (price and ma5) else "?")
+            )
+            logger.info(
+                "[진단 %s] %s 가격=%s ma5=%.0f(%s) vol_ratio=%.2fx (S1≥1.5/S5≥2.0) 변동=%+.1f%%",
+                time_str[:6], code,
+                f"{price:,}" if price else "수신X",
+                ma5, ma5_status, vol_ratio, change,
+            )
 
     def _handle_signal(self, signal, state: dict) -> None:
         """전략 시그널 → 주문 발주 (paper / live mock)."""
