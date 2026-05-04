@@ -132,14 +132,21 @@ class AutoTrader:
                 now = datetime.now()
                 time_str = now.strftime("%H%M%S")
 
-                # S5 장전 뉴스 수집 (08:50~09:00, 하루 1회)
+                # S5 장전 뉴스 수집 (08:50~09:00 정규 OR 09:00 이후 첫 시작 시 회복)
                 today_str = now.strftime("%Y%m%d")
+                hhmm = now.strftime("%H%M")
+                in_premarket_window = _PREMARKET_START_TIME <= hhmm < "0900"
+                late_recovery_window = "0900" <= hhmm <= "1430"
                 if (
                     settings.STRATEGY_S5_ENABLED
-                    and _PREMARKET_START_TIME <= now.strftime("%H%M") < "0900"
                     and self._premarket_done_today != today_str
+                    and (in_premarket_window or late_recovery_window)
                 ):
                     self._premarket_done_today = today_str
+                    if late_recovery_window:
+                        logger.warning(
+                            "[main] 장전 윈도우 지나서 시작됨 - 즉시 회복 실행"
+                        )
                     threading.Thread(
                         target=self._run_premarket,
                         daemon=True,
