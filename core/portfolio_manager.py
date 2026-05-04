@@ -104,38 +104,6 @@ class PortfolioManager:
         # 보유 포지션 {code: Position}
         self._positions: dict[str, Position] = {}
 
-    def sync_from_balance(
-        self,
-        cash: float,
-        positions: list,
-        default_strategy: str = "EXTERNAL",
-    ) -> None:
-        """KIS 잔고 조회 결과를 PortfolioManager 상태로 반영.
-        재시작 후 기존 포지션을 이어받아 관리하기 위함.
-
-        Args:
-            cash: KIS 가용 현금 (dnca_tot_amt 등)
-            positions: KIS BalanceItem 목록 (code/name/quantity/avg_price/current_price 보유)
-            default_strategy: 기존 포지션의 전략 정보가 없을 때 표기. EXTERNAL=수동/이전세션
-        """
-        with self._lock:
-            self._cash = float(cash)
-            self._positions = {}
-            for item in positions:
-                self._positions[item.code] = Position(
-                    code=item.code,
-                    name=item.name or item.code,
-                    strategy=default_strategy,
-                    quantity=int(item.quantity),
-                    avg_price=float(item.avg_price),
-                    current_price=int(item.current_price),
-                    high_price_since_entry=int(item.current_price),
-                )
-        logger.info(
-            "[Portfolio] KIS 잔고 동기화 | 현금=%.0f원, 포지션=%d개",
-            cash, len(positions),
-        )
-
         # 체결 이력
         self._trade_history: list[TradeHistory] = []
 
@@ -163,6 +131,38 @@ class PortfolioManager:
         self._last_rebalance_month: Optional[int] = None
 
         logger.info(f"PortfolioManager 초기화 | 초기자본={initial_capital:,.0f}원")
+
+    def sync_from_balance(
+        self,
+        cash: float,
+        positions: list,
+        default_strategy: str = "EXTERNAL",
+    ) -> None:
+        """KIS 잔고 조회 결과를 PortfolioManager 상태로 반영.
+        재시작 후 기존 포지션을 이어받아 관리하기 위함.
+
+        Args:
+            cash: KIS 가용 현금 (dnca_tot_amt 등)
+            positions: KIS BalanceItem 목록 (code/name/quantity/avg_price/current_price)
+            default_strategy: 기존 포지션의 전략 정보가 없을 때 표기. EXTERNAL=수동/이전세션
+        """
+        with self._lock:
+            self._cash = float(cash)
+            self._positions = {}
+            for item in positions:
+                self._positions[item.code] = Position(
+                    code=item.code,
+                    name=item.name or item.code,
+                    strategy=default_strategy,
+                    quantity=int(item.quantity),
+                    avg_price=float(item.avg_price),
+                    current_price=int(item.current_price),
+                    high_price_since_entry=int(item.current_price),
+                )
+        logger.info(
+            "[Portfolio] KIS 잔고 동기화 | 현금=%.0f원, 포지션=%d개",
+            cash, len(positions),
+        )
 
     # ─────────────────────────────────────────────────────────────
     # 가격 업데이트 (실시간 WebSocket → 호출)
