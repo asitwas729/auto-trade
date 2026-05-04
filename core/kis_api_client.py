@@ -770,9 +770,18 @@ class KISApiClient:
             )
 
         summary = data.get("output2", [{}])[0]
+        # 현금: 예수금총금액(dnca_tot_amt)이 KIS 공식 가용 현금 필드.
+        # ord_psbl_cash는 표준 응답에 없어 항상 0이었던 버그 수정.
+        # 일부 시점/계좌에 따라 prvs_rcdl_excc_amt(가수도정산), nxdy_excc_amt(익일정산)에
+        # 잔액이 있을 수 있어 max로 폴백.
+        cash = max(
+            int(summary.get("dnca_tot_amt", 0) or 0),
+            int(summary.get("prvs_rcdl_excc_amt", 0) or 0),
+            int(summary.get("nxdy_excc_amt", 0) or 0),
+        )
         return Balance(
-            cash=int(summary.get("ord_psbl_cash", 0)),
-            total_eval=int(summary.get("tot_evlu_amt", 0)),
+            cash=cash,
+            total_eval=int(summary.get("tot_evlu_amt", 0) or 0),
             positions=positions,
         )
 
