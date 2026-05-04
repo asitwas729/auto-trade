@@ -1027,12 +1027,26 @@ class KISApiClient:
             self._realtime_price_cb(code, parsed)
 
     def _parse_orderbook_data(self, data_str: str) -> None:
-        """H0STASP0 호가 파싱"""
+        """
+        H0STASP0 호가 파싱 (^구분자, KIS 명세).
+        Layout:
+          0: 종목코드, 1: 영업시간, 2: 시간구분
+          3~12: 매도호가 1~10, 13~22: 매수호가 1~10
+          23~32: 매도호가잔량, 33~42: 매수호가잔량
+          43: 총매도호가잔량, 44: 총매수호가잔량
+        """
         fields = data_str.split("^")
-        if len(fields) < 5:
+        if len(fields) < 45:
             return
         code = fields[0]
-        parsed = {"code": code, "raw": fields}
+        parsed = {
+            "code": code,
+            "ask1": self._to_int(fields[3]),
+            "bid1": self._to_int(fields[13]),
+            "ask_qty_sum": self._to_int(fields[43]),
+            "bid_qty_sum": self._to_int(fields[44]),
+            "timestamp": fields[1],
+        }
         if hasattr(self, "_realtime_orderbook_cb") and self._realtime_orderbook_cb:
             self._realtime_orderbook_cb(code, parsed)
 

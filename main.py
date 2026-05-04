@@ -106,13 +106,8 @@ class AutoTrader:
         if not settings.is_paper:
             self._sync_balance()
 
-        # 실시간 구독 (watch list는 별도 설정 필요)
-        watch_codes = self._get_watch_list()
-        if watch_codes:
-            self._api.subscribe_realtime(
-                codes=watch_codes,
-                on_price=self._on_realtime_price,
-            )
+        # 실시간 구독은 장전 준비(_run_premarket)에서 워치리스트만 체결가+호가
+        # 동시 구독. 시작 시점엔 WS 미연결 상태로 둠 (KIS WebSocket 한도 절약).
 
         # S5 섹터 대장주 캐시 초기화 (분기 만료 시 갱신)
         if settings.STRATEGY_S5_ENABLED:
@@ -291,17 +286,25 @@ class AutoTrader:
             logger.info("[main] S5 장전 준비 시작")
             watchlist = self._strategy.prepare_premarket()
             if watchlist:
-                # 기존 구독에 S5 워치리스트 추가
+                # 워치리스트 종목만 체결가 + 호가 동시 구독
+                # (KIS WebSocket 한도 절약 + S1 매수세 필터 활성화)
                 self._api.subscribe_realtime(
                     codes=watchlist,
                     on_price=self._on_realtime_price,
+                    on_orderbook=self._on_realtime_orderbook,
                 )
-                logger.info("[main] S5 워치리스트 WebSocket 구독: %s", watchlist)
-                # 일봉 지표 프리로드 (ma5, vol_ma20)
+                logger.info(
+                    "[main] 워치리스트 WebSocket 구독 (체결가+호가): %s", watchlist
+                )
+                # 일봉 지표 프리로드 (ma5, ma20, vol_ma20)
                 self._preload_daily_indicators(watchlist)
             self._notifier.send(f"S5 장전 준비 완료 | {len(watchlist)}종목 선정")
         except Exception as exc:
             logger.error("[main] S5 장전 준비 오류: %s", exc, exc_info=True)
+
+    def _on_realtime_orderbook(self, code: str, data: dict) -> None:
+        """WebSocket 호가 콜백 → MarketDataCollector 캐시 갱신."""
+        self._data.on_orderbook(code, data)
 
     def _preload_daily_indicators(self, codes: list[str]) -> None:
         """워치리스트 종목의 일봉 지표(ma5, vol_ma20, prev_close)를 캐시.
@@ -426,8 +429,14 @@ class AutoTrader:
                     "vol_ma20": vol_ma20,
                     "vol_ratio": vol_ratio,
                 }
-                # 호가 미수신 → 0으로 전달, S1의 조건 4가 자동 PASS
-                ob = {"ask1": 0, "bid1": 0, "bid_qty_sum": 0, "ask_qty_sum": 0}
+                # 호가 캐시에서 읽어옴. 미수신 시 0(자동 PASS) 폴백.
+                ob_cache = self._data.get_orderbook(code)
+                ob = {
+                    "ask1": ob_cache.get("ask1", 0),
+                    "bid1": ob_cache.get("bid1", 0),
+                    "bid_qty_sum": ob_cache.get("bid_qty_sum", 0),
+                    "ask_qty_sum": ob_cache.get("ask_qty_sum", 0),
+                }
 
                 pos = self._portfolio.positions.get(code)
                 signal = self._strategy.evaluate_s1(
