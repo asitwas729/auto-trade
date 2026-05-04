@@ -268,6 +268,12 @@ class AutoTrader:
     def _sync_balance(self) -> None:
         try:
             balance = self._api.get_balance()
+            # 1. PortfolioManager에 포지션/현금 복원 (재시작 후 이어받기)
+            self._portfolio.sync_from_balance(
+                cash=balance.cash,
+                positions=balance.positions,
+            )
+            # 2. RiskManager도 동기화
             self._risk.update_portfolio_state(
                 total_eval=balance.total_eval,
                 cash=balance.cash,
@@ -275,8 +281,15 @@ class AutoTrader:
             )
             logger.info(
                 f"잔고 동기화 | 총 평가={balance.total_eval:,.0f}원 "
-                f"| 현금={balance.cash:,.0f}원"
+                f"| 현금={balance.cash:,.0f}원 "
+                f"| 포지션={len(balance.positions)}개"
             )
+            for p in balance.positions:
+                logger.info(
+                    f"  보유: {p.name}({p.code}) {p.quantity}주 "
+                    f"@평단{p.avg_price:,.0f}원 (현재 {p.current_price:,}원, "
+                    f"손익 {p.profit_loss_rate:+.2%})"
+                )
         except Exception as exc:
             logger.error(f"잔고 동기화 실패: {exc}")
 
@@ -490,17 +503,25 @@ class AutoTrader:
             )
 
     def _handle_signal(self, signal, state: dict) -> None:
-        """전략 시그널 → 주문 발주 (paper / live mock)."""
+        """전략 시그널 → 주문 발주 (paper / live mock).
+        매수 시 _portfolio.cash 기준으로 같은 tick 내 누적 발주를 방지."""
         from config.constants import S5_PARAMS
         from strategies.base_strategy import Signal as SignalEnum
 
         if signal.signal == SignalEnum.BUY:
-            # 매수 수량 = 가용현금 × 비중 / 가격 (S1/S5 공통 비중 사용)
-            budget = state["cash"] * S5_PARAMS["position_ratio"]
+            available = self._portfolio.cash  # 실시간 가용 현금
+            # 1회 비중 vs 실가용 중 작은 쪽 사용
+            budget = min(state["cash"] * S5_PARAMS["position_ratio"], available)
             qty = int(budget // signal.price)
-            if qty <= 0:
-                logger.warning("[main] %s 매수 수량 0 (현금부족)", signal.code)
+            required = qty * signal.price * 1.01  # 1% 수수료/슬리피지 버퍼
+            if qty <= 0 or required > available:
+                logger.warning(
+                    "[main] %s 매수 스킵 (가용=%d, 필요=%d)",
+                    signal.code, int(available), int(required),
+                )
                 return
+            # 즉시 가용현금 차감 (낙관적 reservation - 실패시 sync_balance가 복원)
+            self._portfolio._cash -= required
         else:
             # 매도: 시그널의 quantity 우선, 없으면 보유 × sell_ratio
             qty = signal.quantity or int(

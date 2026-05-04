@@ -60,6 +60,17 @@ class RateLimitError(Exception):
     """KIS API 초당 거래건수 초과 (EGW00201)"""
 
 
+class KISBusinessError(Exception):
+    """KIS 비즈니스 로직 거부 (잔고부족, 호가단위, 매도가능수량 등).
+    인프라 정상이므로 _set_api_error 플래그는 설정하지 않음.
+    msg_cd 4xxxxxxx 류가 여기로 분류됨."""
+
+    def __init__(self, msg_cd: str, msg: str) -> None:
+        super().__init__(f"[{msg_cd}] {msg}")
+        self.msg_cd = msg_cd
+        self.msg = msg
+
+
 @dataclass
 class TokenInfo:
     access_token: str
@@ -377,6 +388,9 @@ class KISApiClient:
                 self._check_api_response(data)
                 self._api_error = False
                 return data
+            except KISBusinessError as exc:
+                logger.warning(f"GET {path} KIS 거부: {exc}")
+                raise
             except RateLimitError as exc:
                 last_exc = exc
                 self._add_rate_limit_penalty()
@@ -432,6 +446,11 @@ class KISApiClient:
                 self._check_api_response(data)
                 self._api_error = False
                 return data
+            except KISBusinessError as exc:
+                # 잔고부족/호가단위 등 비즈니스 거부 - 인프라 정상이므로
+                # api_error 플래그 안 건드리고 즉시 호출자에게 전달.
+                logger.warning(f"POST {path} KIS 거부: {exc}")
+                raise
             except RateLimitError as exc:
                 last_exc = exc
                 self._add_rate_limit_penalty()
@@ -487,6 +506,9 @@ class KISApiClient:
             msg    = data.get("msg1", "알 수 없는 오류")
             if msg_cd == "EGW00201":
                 raise RateLimitError(f"초당 거래건수 초과 [{msg_cd}]: {msg}")
+            # KIS 비즈니스 거부 (잔고/한도/호가 등) - 인프라 정상
+            if msg_cd.startswith("4"):
+                raise KISBusinessError(msg_cd, msg)
             raise RuntimeError(f"KIS API 오류 [{msg_cd}]: {msg}")
 
     def _make_hashkey(self, body: dict) -> str:
