@@ -44,6 +44,9 @@ _STRATEGY_TICK_SEC = 30
 # S5 진입 시작 시각 (이후 평가 가능)
 _S5_ENTRY_TIME = "092000"
 
+# S1 진입 시작 시각 (호가 데이터 없는 경량 모드)
+_S1_ENTRY_TIME = "091500"
+
 
 class AutoTrader:
 
@@ -170,12 +173,18 @@ class AutoTrader:
                 if self._order_mgr:
                     self._order_mgr.sync_filled_orders()
 
-                # S5 전략 평가 (09:20 이후, _STRATEGY_TICK_SEC 간격)
-                if time_str >= _S5_ENTRY_TIME:
+                # 전략 평가 (09:15 S1 / 09:20 S5, _STRATEGY_TICK_SEC 간격)
+                if time_str >= _S1_ENTRY_TIME:
                     now_mono = time.monotonic()
                     if now_mono - self._last_strategy_tick >= _STRATEGY_TICK_SEC:
                         self._last_strategy_tick = now_mono
-                        self._evaluate_s5_watchlist(time_str)
+                        if settings.STRATEGY_S1_ENABLED:
+                            self._evaluate_s1_watchlist(time_str)
+                        if (
+                            settings.STRATEGY_S5_ENABLED
+                            and time_str >= _S5_ENTRY_TIME
+                        ):
+                            self._evaluate_s5_watchlist(time_str)
 
                 # 장 마감 전 일일 리포트 (15:30)
                 if "153000" <= time_str <= "153100":
@@ -314,13 +323,15 @@ class AutoTrader:
                 last = df.iloc[-1]
                 self._daily_indicators[code] = {
                     "ma5": float(last.get("ma5", 0) or 0),
+                    "ma20": float(last.get("ma20", 0) or 0),
                     "vol_ma20": float(last.get("vol_ma20", 0) or 0),
                     "prev_close": int(last.get("close", 0) or 0),
                 }
                 logger.info(
-                    "[main] %s 지표 로드: ma5=%.0f, vol_ma20=%.0f, prev_close=%d",
+                    "[main] %s 지표 로드: ma5=%.0f, ma20=%.0f, vol_ma20=%.0f, prev_close=%d",
                     code,
                     self._daily_indicators[code]["ma5"],
+                    self._daily_indicators[code]["ma20"],
                     self._daily_indicators[code]["vol_ma20"],
                     self._daily_indicators[code]["prev_close"],
                 )
@@ -378,21 +389,79 @@ class AutoTrader:
                 logger.error("[main] %s 전략 평가 오류: %s", code, exc, exc_info=True)
         logger.debug("[main] S5 평가 완료: %d종목", evaluated)
 
+    def _evaluate_s1_watchlist(self, time_str: str) -> None:
+        """S1 워치리스트 평가 (옵션A: S5 워치리스트 공유, 호가는 0=조건4 자동통과)."""
+        watchlist = self._strategy.get_s5_watchlist()  # 일단 S5와 공유
+        if not watchlist:
+            return
+
+        for code in watchlist:
+            try:
+                price = self._data.get_last_price(code)
+                if not price:
+                    continue
+                today_bar = self._data.get_today_ohlcv(code) or {}
+                indicators = self._daily_indicators.get(code, {})
+                prev_close = indicators.get("prev_close", 0)
+                vol_ma20 = indicators.get("vol_ma20", 0)
+                today_volume = today_bar.get("volume", 0)
+                vol_ratio = (today_volume / vol_ma20) if vol_ma20 > 0 else 0.0
+
+                price_data = {
+                    "current_price": price,
+                    "open": today_bar.get("open", price),
+                    "high": today_bar.get("high", price),
+                    "low": today_bar.get("low", price),
+                    "prev_close": prev_close,
+                    "volume": today_volume,
+                }
+                ind = {
+                    "ma5": indicators.get("ma5", 0),
+                    "ma20": indicators.get("ma20", 0),
+                    "vol_ma20": vol_ma20,
+                    "vol_ratio": vol_ratio,
+                }
+                # 호가 미수신 → 0으로 전달, S1의 조건 4가 자동 PASS
+                ob = {"ask1": 0, "bid1": 0, "bid_qty_sum": 0, "ask_qty_sum": 0}
+
+                pos = self._portfolio.positions.get(code)
+                signal = self._strategy.evaluate_s1(
+                    code=code,
+                    name=pos.name if pos else code,
+                    price_data=price_data,
+                    indicators=ind,
+                    orderbook=ob,
+                    current_time=time_str,
+                    position_qty=pos.quantity if pos else 0,
+                    avg_entry_price=pos.avg_price if pos else 0.0,
+                )
+                if signal:
+                    state = {
+                        "position_qty": pos.quantity if pos else 0,
+                        "avg_price": pos.avg_price if pos else 0.0,
+                        "cash": self._portfolio.cash,
+                    }
+                    self._handle_signal(signal, state)
+            except Exception as exc:
+                logger.error("[main] %s S1 평가 오류: %s", code, exc, exc_info=True)
+
     def _handle_signal(self, signal, state: dict) -> None:
         """전략 시그널 → 주문 발주 (paper / live mock)."""
         from config.constants import S5_PARAMS
         from strategies.base_strategy import Signal as SignalEnum
 
         if signal.signal == SignalEnum.BUY:
-            # 매수 수량 = 가용현금 × 비중 / 가격
+            # 매수 수량 = 가용현금 × 비중 / 가격 (S1/S5 공통 비중 사용)
             budget = state["cash"] * S5_PARAMS["position_ratio"]
             qty = int(budget // signal.price)
             if qty <= 0:
                 logger.warning("[main] %s 매수 수량 0 (현금부족)", signal.code)
                 return
         else:
-            # 매도: 보유 수량 × sell_ratio
-            qty = int(state["position_qty"] * (signal.sell_ratio or 1.0))
+            # 매도: 시그널의 quantity 우선, 없으면 보유 × sell_ratio
+            qty = signal.quantity or int(
+                state["position_qty"] * (signal.sell_ratio or 1.0)
+            )
             if qty <= 0:
                 return
 
