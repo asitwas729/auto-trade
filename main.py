@@ -75,6 +75,7 @@ class AutoTrader:
         self._daily_indicators: dict[str, dict] = {}
         self._last_strategy_tick = 0.0  # time.monotonic() 마지막 평가 시각
         self._diag_tick_count = 0       # 진단 로그 주기 카운터 (10 tick = 5분)
+        self._last_balance_sync = 0.0   # KIS 잔고 마지막 재동기화 시각
 
         # 페이퍼 트레이딩 또는 실거래 주문 매니저
         if settings.is_paper:
@@ -168,6 +169,20 @@ class AutoTrader:
                 # 체결 동기화 (실거래)
                 if self._order_mgr:
                     self._order_mgr.sync_filled_orders()
+
+                # KIS 잔고 주기적 재동기화 (5분 간격)
+                # 체결 누락/모의 시스템 드리프트로 portfolio와 실 잔고가
+                # 어긋날 때 자동 복구. paper 모드는 KIS 잔고 없으므로 스킵.
+                if (
+                    not settings.is_paper
+                    and time.monotonic() - self._last_balance_sync >= 300
+                ):
+                    self._last_balance_sync = time.monotonic()
+                    threading.Thread(
+                        target=self._sync_balance,
+                        daemon=True,
+                        name="balance-resync",
+                    ).start()
 
                 # 전략 평가 (09:15 S1 / 09:20 S5, _STRATEGY_TICK_SEC 간격)
                 if time_str >= _S1_ENTRY_TIME:
@@ -536,7 +551,7 @@ class AutoTrader:
             self._paper.place_order(signal, qty)
         elif self._order_mgr:
             if signal.signal == SignalEnum.BUY:
-                self._order_mgr.place_buy(
+                order = self._order_mgr.place_buy(
                     strategy=signal.strategy,
                     code=signal.code,
                     name=signal.name,
@@ -544,13 +559,25 @@ class AutoTrader:
                     price=signal.price,
                 )
             else:
-                self._order_mgr.place_sell(
+                order = self._order_mgr.place_sell(
                     strategy=signal.strategy,
                     code=signal.code,
                     name=signal.name,
                     quantity=qty,
                     price=signal.price,
                 )
+            # 매도 주문 실패 시 KIS 잔고와 어긋났을 가능성 → 즉시 재동기화
+            # (대표 사례: KIS 40240000 "모의투자 잔고내역이 없습니다")
+            if order is None and signal.signal == SignalEnum.SELL:
+                logger.warning(
+                    "[main] 매도 주문 실패 → KIS 잔고 재동기화 트리거"
+                )
+                self._last_balance_sync = time.monotonic()
+                threading.Thread(
+                    target=self._sync_balance,
+                    daemon=True,
+                    name="balance-resync-on-fail",
+                ).start()
 
     def _get_watch_list(self) -> list[str]:
         """감시 종목 목록. S5 워치리스트는 장전 스레드에서 동적 추가."""
