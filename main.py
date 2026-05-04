@@ -328,7 +328,8 @@ class AutoTrader:
                 )
                 # 일봉 지표 프리로드 (ma5, ma20, vol_ma20)
                 self._preload_daily_indicators(watchlist)
-            self._notifier.send(f"S5 장전 준비 완료 | {len(watchlist)}종목 선정")
+            # 장전 준비 완료는 로컬 로그만 (슬랙 푸시 X - 노이즈 줄임)
+            logger.info("[main] S5 장전 준비 완료 | %d종목 선정", len(watchlist))
         except Exception as exc:
             logger.error("[main] S5 장전 준비 오류: %s", exc, exc_info=True)
 
@@ -547,8 +548,16 @@ class AutoTrader:
             if qty <= 0:
                 return
 
+        side_str = "매수" if signal.signal == SignalEnum.BUY else "매도"
+
         if self._paper:
-            self._paper.place_order(signal, qty)
+            paper_order = self._paper.place_order(signal, qty)
+            if paper_order:
+                self._notifier.send(
+                    f"{side_str} 주문 | {signal.name}({signal.code}) "
+                    f"{qty}주 @{signal.price:,}원 [{signal.strategy}]",
+                    level="TRADE",
+                )
         elif self._order_mgr:
             if signal.signal == SignalEnum.BUY:
                 order = self._order_mgr.place_buy(
@@ -565,6 +574,13 @@ class AutoTrader:
                     name=signal.name,
                     quantity=qty,
                     price=signal.price,
+                )
+            # 발주 성공 시 즉시 슬랙 (체결 콜백 notify_trade는 별도로 발송)
+            if order is not None:
+                self._notifier.send(
+                    f"{side_str} 주문 | {signal.name}({signal.code}) "
+                    f"{qty}주 @{signal.price:,}원 [{signal.strategy}] - {signal.reason}",
+                    level="TRADE",
                 )
             # 매도 주문 실패 시 KIS 잔고와 어긋났을 가능성 → 즉시 재동기화
             # (대표 사례: KIS 40240000 "모의투자 잔고내역이 없습니다")
