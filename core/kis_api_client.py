@@ -1094,9 +1094,9 @@ class KISApiClient:
             self._realtime_orderbook_cb(code, parsed)
 
     def _on_ws_error(self, ws, error) -> None:
+        # WS 오류는 REST 주문과 독립적 인프라이므로 _api_error 플래그를
+        # 건드리지 않는다. 자동 재연결 로직이 별도로 처리.
         logger.error(f"WebSocket 오류: {error}")
-        self._api_error = True
-        self._last_error_time = datetime.now()
 
     def _on_ws_close(self, ws, close_status_code, close_msg) -> None:
         logger.warning(f"WebSocket 연결 종료: {close_status_code} {close_msg}")
@@ -1149,6 +1149,8 @@ class KISApiClient:
                 if self._ws_connected.wait(timeout=15):
                     logger.info(f"WebSocket 재연결 성공 ({len(codes)}종목 재구독)")
                     self._ws_reconnect_attempts = 0
+                    # 이전 버전에서 WS 오류로 _api_error가 설정됐다면 해제
+                    self._api_error = False
                     return
                 logger.warning("WebSocket 재연결 타임아웃")
             except Exception as exc:
