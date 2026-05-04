@@ -165,6 +165,8 @@ class KISApiClient:
         self._ws_subscriptions: dict[str, Callable] = {}  # key → callback
         self._ws_approval_key: Optional[str] = None
         self._subscribed_codes: set[str] = set()  # 현재 구독 중인 종목코드
+        self._ws_intentional_close = False         # unsubscribe_all 호출 시 True
+        self._ws_reconnect_attempts = 0            # 연속 재연결 시도 횟수
 
         # API 오류 감지 플래그
         self._api_error = False
@@ -922,6 +924,7 @@ class KISApiClient:
         logger.info(f"실시간 구독 시작: {codes}")
 
     def unsubscribe_all(self) -> None:
+        self._ws_intentional_close = True
         if self._ws:
             self._ws.close()
 
@@ -1042,3 +1045,57 @@ class KISApiClient:
         logger.warning(f"WebSocket 연결 종료: {close_status_code} {close_msg}")
         self._ws_connected.clear()
         self._subscribed_codes.clear()
+        # 의도적 종료가 아니면 재연결 스케줄
+        if not self._ws_intentional_close:
+            threading.Thread(
+                target=self._reconnect_loop,
+                daemon=True,
+                name="ws-reconnect",
+            ).start()
+
+    def _reconnect_loop(self) -> None:
+        """WebSocket 끊김 시 지수 백오프 재연결 (최대 5회)."""
+        max_attempts = 5
+        while self._ws_reconnect_attempts < max_attempts and not self._ws_intentional_close:
+            self._ws_reconnect_attempts += 1
+            backoff = min(2 ** self._ws_reconnect_attempts, 60)
+            logger.info(
+                f"WebSocket 재연결 시도 {self._ws_reconnect_attempts}/{max_attempts} "
+                f"({backoff}s 후)"
+            )
+            time.sleep(backoff)
+            if self._ws_intentional_close:
+                return
+            try:
+                # 토큰/승인키 만료 가능성 → 갱신
+                self._ensure_token()
+                if self._ws_approval_key is None:
+                    self._get_ws_approval_key()
+                # 신규 WebSocketApp 생성하여 재구독
+                codes = list(self._realtime_codes)
+                self._ws_connected.clear()
+                self._subscribed_codes.clear()
+                self._ws = websocket.WebSocketApp(
+                    self._ws_url,
+                    on_open=self._on_ws_open,
+                    on_message=self._on_ws_message,
+                    on_error=self._on_ws_error,
+                    on_close=self._on_ws_close,
+                )
+                self._ws_thread = threading.Thread(
+                    target=self._ws.run_forever,
+                    kwargs={"ping_interval": 30, "ping_timeout": 10},
+                    daemon=True,
+                    name="ws-thread",
+                )
+                self._ws_thread.start()
+                if self._ws_connected.wait(timeout=15):
+                    logger.info(f"WebSocket 재연결 성공 ({len(codes)}종목 재구독)")
+                    self._ws_reconnect_attempts = 0
+                    return
+                logger.warning("WebSocket 재연결 타임아웃")
+            except Exception as exc:
+                logger.error(f"WebSocket 재연결 오류: {exc}")
+        logger.error(
+            f"WebSocket 재연결 실패 ({max_attempts}회 초과) - 실시간 시세 중단"
+        )
