@@ -41,11 +41,11 @@ _PREMARKET_START_TIME = "0850"
 # S5 전략 평가 주기 (초). 매 N초마다 워치리스트 종목 평가
 _STRATEGY_TICK_SEC = 30
 
-# S5 진입 시작 시각 (모의 공격형: 09:20 → 09:10)
-_S5_ENTRY_TIME = "091000"
+# S5 진입 시작 시각 (모의 공격형: 정규장 개장 직후)
+_S5_ENTRY_TIME = "090000"
 
-# S1 진입 시작 시각 (모의 공격형: 09:15 → 09:05)
-_S1_ENTRY_TIME = "090500"
+# S1 진입 시작 시각 (모의 공격형: 정규장 개장 직후)
+_S1_ENTRY_TIME = "090000"
 
 
 class AutoTrader:
