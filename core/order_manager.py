@@ -264,7 +264,18 @@ class OrderManager:
                 del self._active_orders[order.order_no]
             logger.info(f"주문 취소 완료 | {order.order_no}")
         else:
-            logger.error(f"주문 취소 실패 | {order.order_no}: {result.message}")
+            # KIS 40330000 "취소할 수량 없음" = 이미 체결/취소된 주문.
+            # active_orders에서 제거해 무한 재시도 루프 방지.
+            err_msg = str(result.message)
+            if "40330000" in err_msg or "취소할 수량" in err_msg:
+                order.status = OrderStatus.CANCELLED
+                if order.order_no in self._active_orders:
+                    del self._active_orders[order.order_no]
+                logger.info(
+                    f"주문 {order.order_no} 이미 종결 처리됨 - active 목록에서 제거"
+                )
+            else:
+                logger.error(f"주문 취소 실패 | {order.order_no}: {result.message}")
 
     def cancel_all(self) -> None:
         """모든 미체결 주문 취소 (kill switch 등)"""

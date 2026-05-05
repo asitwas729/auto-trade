@@ -190,11 +190,31 @@ class SectorManager:
             for sector, codes in SECTOR_UNIVERSE.items()
         }
 
-    def refresh_leaders(self) -> None:
+    def refresh_leaders(self, force: bool = False) -> None:
         """
         KIS API로 섹터별 시가총액·거래량 조회 → 상위 5개 선정 → 캐시 저장.
         API 없이 호출 시 SECTOR_UNIVERSE 그대로 저장.
+
+        force=False(기본): 캐시가 유효하면 스킵 (90일 TTL). 매 시작마다
+            50회 KIS API 호출이 일어나는 걸 방지.
+        force=True: 만료 여부 무시하고 강제 갱신.
         """
+        if not force and _CACHE_PATH.exists():
+            try:
+                raw = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
+                next_upd = datetime.strptime(
+                    raw.get("next_update", "2000-01-01"), "%Y-%m-%d"
+                )
+                if datetime.now() < next_upd:
+                    logger.info(
+                        "[섹터] 캐시 유효 (%s까지) - refresh_leaders 스킵",
+                        next_upd.strftime("%Y-%m-%d"),
+                    )
+                    self._leaders = raw.get("leaders", {})
+                    return
+            except Exception as exc:
+                logger.warning("[섹터] 캐시 검증 실패, 강제 갱신 진행: %s", exc)
+
         leaders: dict[str, list[dict]] = {}
         for sector, codes in SECTOR_UNIVERSE.items():
             ranked = []

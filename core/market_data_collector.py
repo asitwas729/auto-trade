@@ -45,6 +45,9 @@ class MarketDataCollector:
         # 당일 OHLCV {code: dict}
         self._daily_bar: dict[str, dict] = {}
 
+        # 호가 캐시 {code: {"ask1", "bid1", "ask_qty_sum", "bid_qty_sum", "ts"}}
+        self._orderbook: dict[str, dict] = {}
+
         OHLCV_DIR.mkdir(parents=True, exist_ok=True)
         REALTIME_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -91,6 +94,22 @@ class MarketDataCollector:
     def get_today_ohlcv(self, code: str) -> Optional[dict]:
         with self._lock:
             return self._daily_bar.get(code)
+
+    def on_orderbook(self, code: str, data: dict) -> None:
+        """WebSocket 호가 콜백."""
+        with self._lock:
+            self._orderbook[code] = {
+                "ask1": data.get("ask1", 0),
+                "bid1": data.get("bid1", 0),
+                "ask_qty_sum": data.get("ask_qty_sum", 0),
+                "bid_qty_sum": data.get("bid_qty_sum", 0),
+                "ts": datetime.now(),
+            }
+
+    def get_orderbook(self, code: str) -> dict:
+        """현재 호가 캐시 반환. 없으면 빈 dict."""
+        with self._lock:
+            return dict(self._orderbook.get(code, {}))
 
     # ─────────────────────────────────────────────────────────────
     # 일봉 데이터 저장/로드

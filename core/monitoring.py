@@ -23,13 +23,17 @@ logger = logging.getLogger(__name__)
 
 
 def setup_logging() -> None:
-    """로깅 설정 (콘솔 + 일별 파일 로테이션)"""
+    """로깅 설정 (콘솔 + 일별 파일 로테이션). LOG_LEVEL 환경변수로 레벨 제어."""
+    import os
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(level)
 
     # 콘솔
     ch = logging.StreamHandler()
@@ -48,6 +52,11 @@ def setup_logging() -> None:
     )
     fh.setFormatter(fmt)
     root.addHandler(fh)
+
+    # 너무 시끄러운 외부 라이브러리는 WARNING으로 억제
+    if level <= logging.DEBUG:
+        for noisy in ("urllib3", "websocket", "requests"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 class TradeLogger:

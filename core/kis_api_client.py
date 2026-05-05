@@ -34,10 +34,15 @@ from config.constants import (
     KIS_PATH_MINUTE_PRICE,
     KIS_PATH_ORDER_BUY,
     KIS_PATH_ORDER_CANCEL,
+    KIS_PATH_ORDER_SELL,
     KIS_PATH_ORDERBOOK,
     KIS_PATH_PRICE,
     KIS_PATH_TOKEN,
     KIS_PATH_UNFILLED,
+    KIS_RATE_LIMIT_PENALTY_MAX,
+    KIS_RATE_LIMIT_PENALTY_SEC,
+    KIS_RATE_LIMIT_QPS_MOCK,
+    KIS_RATE_LIMIT_QPS_REAL,
     KIS_TR,
     KIS_WS_URL_MOCK,
     KIS_WS_URL_REAL,
@@ -54,6 +59,17 @@ logger = logging.getLogger(__name__)
 
 class RateLimitError(Exception):
     """KIS API 초당 거래건수 초과 (EGW00201)"""
+
+
+class KISBusinessError(Exception):
+    """KIS 비즈니스 로직 거부 (잔고부족, 호가단위, 매도가능수량 등).
+    인프라 정상이므로 _set_api_error 플래그는 설정하지 않음.
+    msg_cd 4xxxxxxx 류가 여기로 분류됨."""
+
+    def __init__(self, msg_cd: str, msg: str) -> None:
+        super().__init__(f"[{msg_cd}] {msg}")
+        self.msg_cd = msg_cd
+        self.msg = msg
 
 
 @dataclass
@@ -160,12 +176,31 @@ class KISApiClient:
         self._ws_connected = threading.Event()
         self._ws_subscriptions: dict[str, Callable] = {}  # key → callback
         self._ws_approval_key: Optional[str] = None
+        self._subscribed_codes: set[str] = set()  # 현재 구독 중인 종목코드
+        self._ws_intentional_close = False         # unsubscribe_all 호출 시 True
+        self._ws_reconnect_attempts = 0            # 연속 재연결 시도 횟수
 
         # API 오류 감지 플래그
         self._api_error = False
         self._last_error_time: Optional[datetime] = None
 
-        logger.info(f"KISApiClient 초기화 | 모드={self._mode}")
+        # 글로벌 레이트리밋 (KIS 초당 거래건수 한도 준수)
+        self._rate_limit_qps = (
+            KIS_RATE_LIMIT_QPS_MOCK if self._is_mock else KIS_RATE_LIMIT_QPS_REAL
+        )
+        self._rate_limit_lock = threading.Lock()
+        self._last_request_at = 0.0
+        self._rate_limit_penalty = 0.0  # EGW00201 적응형 페널티
+
+        # 토큰 디스크 캐시 (재시작 시 재발급 방지 - EGW00133 분당 1회 제한 회피)
+        self._token_cache_path = (
+            settings.DATA_DIR / f".kis_token_{self._mode}.json"
+        )
+
+        logger.info(
+            f"KISApiClient 초기화 | 모드={self._mode} | "
+            f"rate_limit={self._rate_limit_qps}req/s"
+        )
 
     # ─────────────────────────────────────────────────────────────
     # 초기화
@@ -173,13 +208,58 @@ class KISApiClient:
 
     def init(self) -> None:
         """토큰 발급 및 WebSocket 승인키 획득"""
-        self._issue_token()
+        # 디스크 캐시에서 우선 로드 (EGW00133 회피)
+        if not self._load_cached_token():
+            self._issue_token()
         self._get_ws_approval_key()
         logger.info("KISApiClient 초기화 완료")
 
     # ─────────────────────────────────────────────────────────────
     # 토큰 관리
     # ─────────────────────────────────────────────────────────────
+
+    def _load_cached_token(self) -> bool:
+        """디스크 캐시 토큰 로드. 유효하면 True 반환."""
+        try:
+            if not self._token_cache_path.exists():
+                return False
+            with open(self._token_cache_path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            expires_at = datetime.fromisoformat(cached["expires_at"])
+            token = TokenInfo(
+                access_token=cached["access_token"],
+                token_type=cached.get("token_type", "Bearer"),
+                expires_at=expires_at,
+            )
+            if token.is_expired():
+                logger.info("캐시된 토큰 만료 - 신규 발급 필요")
+                return False
+            with self._token_lock:
+                self._token = token
+            logger.info(
+                f"캐시된 Access Token 사용 | 만료: {expires_at:%Y-%m-%d %H:%M:%S}"
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"토큰 캐시 로드 실패: {exc}")
+            return False
+
+    def _save_cached_token(self) -> None:
+        """발급/갱신된 토큰을 디스크에 저장."""
+        try:
+            self._token_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._token_lock:
+                if self._token is None:
+                    return
+                payload = {
+                    "access_token": self._token.access_token,
+                    "token_type": self._token.token_type,
+                    "expires_at": self._token.expires_at.isoformat(),
+                }
+            with open(self._token_cache_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+        except Exception as exc:
+            logger.warning(f"토큰 캐시 저장 실패: {exc}")
 
     def _issue_token(self) -> None:
         url = f"{self._base_url}{KIS_PATH_TOKEN}"
@@ -193,8 +273,17 @@ class KISApiClient:
         if not resp.ok:
             try:
                 err_body = resp.json()
+                err_code = err_body.get("error_code", "") if isinstance(err_body, dict) else ""
             except Exception:
                 err_body = resp.text[:300]
+                err_code = ""
+            # EGW00133: 분당 1회 제한 - 명확한 안내
+            if err_code == "EGW00133":
+                raise RuntimeError(
+                    f"토큰 발급 분당 1회 제한 (EGW00133): {err_body}\n"
+                    f"  → 1분 후 재시도하세요. 또는 이미 발급된 토큰이 "
+                    f"{self._token_cache_path}에 캐시되어야 합니다."
+                )
             raise RuntimeError(
                 f"토큰 발급 실패 HTTP {resp.status_code}: {err_body}\n"
                 f"  서버: {url}\n"
@@ -210,12 +299,15 @@ class KISApiClient:
                 expires_at=expires_at,
             )
         logger.info(f"Access Token 발급 완료 | 만료: {expires_at:%Y-%m-%d %H:%M:%S}")
+        self._save_cached_token()
 
     def _ensure_token(self) -> str:
         with self._token_lock:
-            if self._token is None or self._token.is_expired():
-                logger.info("Access Token 갱신 중...")
-                self._issue_token()
+            needs_refresh = self._token is None or self._token.is_expired()
+        if needs_refresh:
+            logger.info("Access Token 갱신 중...")
+            self._issue_token()
+        with self._token_lock:
             return self._token.access_token
 
     def _get_ws_approval_key(self) -> None:
@@ -247,12 +339,48 @@ class KISApiClient:
             h.update(extra)
         return h
 
+    def _throttle(self) -> None:
+        """글로벌 요청 간격 강제 + EGW00201 적응형 페널티 (멀티스레드 안전)"""
+        min_interval = 1.0 / self._rate_limit_qps
+        with self._rate_limit_lock:
+            now = time.monotonic()
+            wait = self._last_request_at + min_interval + self._rate_limit_penalty - now
+            if wait > 0:
+                # 락 잡은 채 sleep해야 다른 스레드 동시 통과 방지
+                time.sleep(wait)
+            # 페널티는 호출 통과할 때마다 절반으로 감쇠
+            self._rate_limit_penalty *= 0.5
+            if self._rate_limit_penalty < 0.05:
+                self._rate_limit_penalty = 0.0
+            self._last_request_at = time.monotonic()
+
+    def _add_rate_limit_penalty(self) -> None:
+        """EGW00201 발생 시 다음 호출 간격을 늘려 KIS 서버를 진정시킴"""
+        with self._rate_limit_lock:
+            self._rate_limit_penalty = min(
+                self._rate_limit_penalty + KIS_RATE_LIMIT_PENALTY_SEC,
+                KIS_RATE_LIMIT_PENALTY_MAX,
+            )
+        logger.warning(
+            f"레이트리밋 페널티 추가 → 현재 +{self._rate_limit_penalty:.1f}s"
+        )
+
+    @staticmethod
+    def _parse_kis_error(exc: requests.HTTPError) -> tuple[str, str]:
+        """HTTP 에러 응답에서 (msg_cd, msg1) 추출"""
+        try:
+            body = exc.response.json()
+            return body.get("msg_cd", ""), (body.get("msg1") or body.get("message") or "")
+        except Exception:
+            return "", (exc.response.text[:200] if exc.response is not None else "")
+
     def _get(self, path: str, tr_id: str, params: dict) -> dict:
         url = f"{self._base_url}{path}"
         headers = self._headers(tr_id)
         last_exc = None
         for attempt in range(1, API_MAX_RETRY + 1):
             try:
+                self._throttle()
                 resp = requests.get(
                     url, headers=headers, params=params, timeout=API_TIMEOUT_SEC
                 )
@@ -261,20 +389,31 @@ class KISApiClient:
                 self._check_api_response(data)
                 self._api_error = False
                 return data
+            except KISBusinessError as exc:
+                logger.warning(f"GET {path} KIS 거부: {exc}")
+                raise
             except RateLimitError as exc:
                 last_exc = exc
-                logger.warning(f"GET {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - 1초 대기")
+                self._add_rate_limit_penalty()
+                backoff = min(2 ** (attempt - 1), 8)
+                logger.warning(
+                    f"GET {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
+                )
                 if attempt < API_MAX_RETRY:
-                    time.sleep(1.0)
+                    time.sleep(backoff)
             except requests.HTTPError as exc:
                 last_exc = exc
-                try:
-                    body    = exc.response.json()
-                    msg_cd  = body.get("msg_cd", "")
-                    kis_msg = body.get("msg1") or body.get("message") or str(body)
-                except Exception:
-                    msg_cd  = ""
-                    kis_msg = exc.response.text[:200] if exc.response else ""
+                msg_cd, kis_msg = self._parse_kis_error(exc)
+                # KIS는 EGW00201(초당 한도 초과)을 HTTP 500으로 내려줌
+                if msg_cd == "EGW00201":
+                    self._add_rate_limit_penalty()
+                    backoff = min(2 ** (attempt - 1), 8)
+                    logger.warning(
+                        f"GET {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
+                    )
+                    if attempt < API_MAX_RETRY:
+                        time.sleep(backoff)
+                    continue
                 logger.warning(
                     f"GET {path} 실패 ({attempt}/{API_MAX_RETRY}) "
                     f"HTTP {exc.response.status_code} [{msg_cd}]: {kis_msg}"
@@ -295,9 +434,13 @@ class KISApiClient:
         if hash_key:
             extra["hashkey"] = self._make_hashkey(body)
         headers = self._headers(tr_id, extra)
+        is_order = "order" in path.lower()
         last_exc = None
+        # 레이트리밋/일시적 거부는 5분 전체차단 대상이 아님 (개별 주문만 실패)
+        set_api_error_on_exit = True
         for attempt in range(1, API_MAX_RETRY + 1):
             try:
+                self._throttle()
                 resp = requests.post(
                     url, headers=headers, json=body, timeout=API_TIMEOUT_SEC
                 )
@@ -306,16 +449,61 @@ class KISApiClient:
                 self._check_api_response(data)
                 self._api_error = False
                 return data
-            except Exception as exc:
+            except KISBusinessError as exc:
+                # 잔고부족/호가단위 등 비즈니스 거부 - 인프라 정상이므로
+                # api_error 플래그 안 건드리고 즉시 호출자에게 전달.
+                logger.warning(f"POST {path} KIS 거부: {exc}")
+                raise
+            except RateLimitError as exc:
                 last_exc = exc
-                logger.warning(f"POST {path} 실패 ({attempt}/{API_MAX_RETRY}): {exc}")
-                # 주문 API는 재시도 금지 (이중 주문 방지)
-                if "order" in path.lower():
+                self._add_rate_limit_penalty()
+                # 주문은 재시도 금지 (이중 주문 방지) + 레이트리밋은 일시적이므로
+                # 전체 차단(api_error) 안 함 — 다음 tick에서 재시도 가능
+                if is_order:
+                    logger.error(f"POST {path} 초당 한도 초과 - 주문 재시도 금지")
+                    set_api_error_on_exit = False
+                    break
+                backoff = min(2 ** (attempt - 1), 8)
+                logger.warning(
+                    f"POST {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
+                )
+                if attempt < API_MAX_RETRY:
+                    time.sleep(backoff)
+            except requests.HTTPError as exc:
+                last_exc = exc
+                msg_cd, kis_msg = self._parse_kis_error(exc)
+                if msg_cd == "EGW00201":
+                    self._add_rate_limit_penalty()
+                    if is_order:
+                        logger.error(f"POST {path} 초당 한도 초과 - 주문 재시도 금지")
+                        set_api_error_on_exit = False
+                        break
+                    backoff = min(2 ** (attempt - 1), 8)
+                    logger.warning(
+                        f"POST {path} 초당 한도 초과 ({attempt}/{API_MAX_RETRY}) - {backoff}s 대기"
+                    )
+                    if attempt < API_MAX_RETRY:
+                        time.sleep(backoff)
+                    continue
+                logger.warning(
+                    f"POST {path} 실패 ({attempt}/{API_MAX_RETRY}) "
+                    f"HTTP {exc.response.status_code} [{msg_cd}]: {kis_msg}"
+                )
+                if is_order:
                     logger.error("주문 API 재시도 금지 - 이중 주문 위험")
                     break
                 if attempt < API_MAX_RETRY:
                     time.sleep(API_RETRY_DELAY_SEC * attempt)
-        self._set_api_error()
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"POST {path} 실패 ({attempt}/{API_MAX_RETRY}): {exc}")
+                if is_order:
+                    logger.error("주문 API 재시도 금지 - 이중 주문 위험")
+                    break
+                if attempt < API_MAX_RETRY:
+                    time.sleep(API_RETRY_DELAY_SEC * attempt)
+        if set_api_error_on_exit:
+            self._set_api_error()
         raise RuntimeError(f"POST {path} 실패: {last_exc}") from last_exc
 
     def _check_api_response(self, data: dict) -> None:
@@ -325,6 +513,9 @@ class KISApiClient:
             msg    = data.get("msg1", "알 수 없는 오류")
             if msg_cd == "EGW00201":
                 raise RateLimitError(f"초당 거래건수 초과 [{msg_cd}]: {msg}")
+            # KIS 비즈니스 거부 (잔고/한도/호가 등) - 인프라 정상
+            if msg_cd.startswith("4"):
+                raise KISBusinessError(msg_cd, msg)
             raise RuntimeError(f"KIS API 오류 [{msg_cd}]: {msg}")
 
     def _make_hashkey(self, body: dict) -> str:
@@ -608,9 +799,29 @@ class KISApiClient:
             )
 
         summary = data.get("output2", [{}])[0]
+        # 가용 현금 산정 우선순위:
+        #   1) ord_psbl_cash (주문가능현금) — 일부 응답에 포함, 가장 정확
+        #   2) prvs_rcdl_excc_amt (T+2 정산금액) — 정산 후 가용
+        #   3) dnca_tot_amt - thdt_buy_amt + thdt_sll_amt — 예수금에서 당일
+        #      매수/매도 차감 후 (모의 마진 매수 반영)
+        # 모의투자는 dnca_tot_amt가 시작자본 그대로 유지되는 경우가 있어
+        # 그것만 보면 과대 추정됨.
+        ord_psbl = int(summary.get("ord_psbl_cash", 0) or 0)
+        prvs_rcdl = int(summary.get("prvs_rcdl_excc_amt", 0) or 0)
+        dnca = int(summary.get("dnca_tot_amt", 0) or 0)
+        today_buy = int(summary.get("thdt_buy_amt", 0) or 0)
+        today_sell = int(summary.get("thdt_sll_amt", 0) or 0)
+
+        if ord_psbl > 0:
+            cash = ord_psbl
+        elif prvs_rcdl > 0:
+            cash = prvs_rcdl
+        else:
+            cash = max(0, dnca - today_buy + today_sell)
+
         return Balance(
-            cash=int(summary.get("ord_psbl_cash", 0)),
-            total_eval=int(summary.get("tot_evlu_amt", 0)),
+            cash=cash,
+            total_eval=int(summary.get("tot_evlu_amt", 0) or 0),
             positions=positions,
         )
 
@@ -712,13 +923,36 @@ class KISApiClient:
         on_orderbook: Callable[[str, dict], None] | None = None,
     ) -> None:
         """
-        실시간 체결가 (+ 선택적으로 호가) 구독 시작
-        on_price(code, data): 체결가 콜백
-        on_orderbook(code, data): 호가 콜백 (선택)
+        실시간 체결가 (+ 선택적으로 호가) 구독 시작.
+
+        이미 WebSocket이 연결돼 있으면 신규 종목만 추가 구독한다
+        (KIS는 동일 approval_key 중복 연결을 강제 종료하므로 절대 새 WS를 열면 안 됨).
         """
         self._realtime_price_cb = on_price
         self._realtime_orderbook_cb = on_orderbook
-        self._realtime_codes = codes
+
+        # 기존 연결 살아있으면 신규 종목만 추가 구독
+        if (
+            self._ws is not None
+            and self._ws_thread is not None
+            and self._ws_thread.is_alive()
+            and self._ws_connected.is_set()
+        ):
+            new_codes = [c for c in codes if c not in self._subscribed_codes]
+            if not new_codes:
+                logger.debug(f"실시간 구독 변경 없음 (이미 구독 중): {codes}")
+                return
+            for code in new_codes:
+                self._send_subscribe(code, self._tr["ws_real_price"])
+                if on_orderbook:
+                    self._send_subscribe(code, self._tr["ws_orderbook"])
+                self._subscribed_codes.add(code)
+            logger.info(f"실시간 구독 추가: {new_codes}")
+            return
+
+        # 신규 연결
+        self._realtime_codes = list(codes)
+        self._subscribed_codes = set()
 
         self._ws = websocket.WebSocketApp(
             self._ws_url,
@@ -739,6 +973,7 @@ class KISApiClient:
         logger.info(f"실시간 구독 시작: {codes}")
 
     def unsubscribe_all(self) -> None:
+        self._ws_intentional_close = True
         if self._ws:
             self._ws.close()
 
@@ -749,6 +984,7 @@ class KISApiClient:
             self._send_subscribe(code, self._tr["ws_real_price"])
             if self._realtime_orderbook_cb:
                 self._send_subscribe(code, self._tr["ws_orderbook"])
+            self._subscribed_codes.add(code)
 
     def _send_subscribe(self, code: str, tr_id: str) -> None:
         payload = {
@@ -799,6 +1035,24 @@ class KISApiClient:
         except Exception as exc:
             logger.warning(f"실시간 데이터 파싱 오류: {exc}")
 
+    @staticmethod
+    def _to_int(s: str, default: int = 0) -> int:
+        """KIS 실시간 필드 안전 정수 변환 (장전/시간외에 '0.00' 같은 소수 문자열로 올 수 있음)"""
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            try:
+                return int(float(s))
+            except (ValueError, TypeError):
+                return default
+
+    @staticmethod
+    def _to_float(s: str, default: float = 0.0) -> float:
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return default
+
     def _parse_price_data(self, data_str: str) -> None:
         """H0STCNT0 체결가 파싱 (^구분자)"""
         fields = data_str.split("^")
@@ -807,35 +1061,106 @@ class KISApiClient:
         code = fields[0]
         parsed = {
             "code": code,
-            "current_price": int(fields[2]),
+            "current_price": self._to_int(fields[2]),
             "change_sign": fields[3],           # 1=상한, 2=상승, 3=보합, 4=하한, 5=하락
-            "change_price": int(fields[4]),
-            "change_rate": float(fields[5]),
-            "volume": int(fields[8]),
-            "total_volume": int(fields[9]),
-            "high": int(fields[6]),
-            "low": int(fields[7]),
-            "open": int(fields[10]),
+            "change_price": self._to_int(fields[4]),
+            "change_rate": self._to_float(fields[5]),
+            "volume": self._to_int(fields[8]),
+            "total_volume": self._to_int(fields[9]),
+            "high": self._to_int(fields[6]),
+            "low": self._to_int(fields[7]),
+            "open": self._to_int(fields[10]),
             "timestamp": fields[1],
         }
         if hasattr(self, "_realtime_price_cb") and self._realtime_price_cb:
             self._realtime_price_cb(code, parsed)
 
     def _parse_orderbook_data(self, data_str: str) -> None:
-        """H0STASP0 호가 파싱"""
+        """
+        H0STASP0 호가 파싱 (^구분자, KIS 명세).
+        Layout:
+          0: 종목코드, 1: 영업시간, 2: 시간구분
+          3~12: 매도호가 1~10, 13~22: 매수호가 1~10
+          23~32: 매도호가잔량, 33~42: 매수호가잔량
+          43: 총매도호가잔량, 44: 총매수호가잔량
+        """
         fields = data_str.split("^")
-        if len(fields) < 5:
+        if len(fields) < 45:
             return
         code = fields[0]
-        parsed = {"code": code, "raw": fields}
+        parsed = {
+            "code": code,
+            "ask1": self._to_int(fields[3]),
+            "bid1": self._to_int(fields[13]),
+            "ask_qty_sum": self._to_int(fields[43]),
+            "bid_qty_sum": self._to_int(fields[44]),
+            "timestamp": fields[1],
+        }
         if hasattr(self, "_realtime_orderbook_cb") and self._realtime_orderbook_cb:
             self._realtime_orderbook_cb(code, parsed)
 
     def _on_ws_error(self, ws, error) -> None:
+        # WS 오류는 REST 주문과 독립적 인프라이므로 _api_error 플래그를
+        # 건드리지 않는다. 자동 재연결 로직이 별도로 처리.
         logger.error(f"WebSocket 오류: {error}")
-        self._api_error = True
-        self._last_error_time = datetime.now()
 
     def _on_ws_close(self, ws, close_status_code, close_msg) -> None:
         logger.warning(f"WebSocket 연결 종료: {close_status_code} {close_msg}")
         self._ws_connected.clear()
+        self._subscribed_codes.clear()
+        # 의도적 종료가 아니면 재연결 스케줄
+        if not self._ws_intentional_close:
+            threading.Thread(
+                target=self._reconnect_loop,
+                daemon=True,
+                name="ws-reconnect",
+            ).start()
+
+    def _reconnect_loop(self) -> None:
+        """WebSocket 끊김 시 지수 백오프 재연결 (최대 5회)."""
+        max_attempts = 5
+        while self._ws_reconnect_attempts < max_attempts and not self._ws_intentional_close:
+            self._ws_reconnect_attempts += 1
+            backoff = min(2 ** self._ws_reconnect_attempts, 60)
+            logger.info(
+                f"WebSocket 재연결 시도 {self._ws_reconnect_attempts}/{max_attempts} "
+                f"({backoff}s 후)"
+            )
+            time.sleep(backoff)
+            if self._ws_intentional_close:
+                return
+            try:
+                # 토큰/승인키 만료 가능성 → 갱신
+                self._ensure_token()
+                if self._ws_approval_key is None:
+                    self._get_ws_approval_key()
+                # 신규 WebSocketApp 생성하여 재구독
+                codes = list(self._realtime_codes)
+                self._ws_connected.clear()
+                self._subscribed_codes.clear()
+                self._ws = websocket.WebSocketApp(
+                    self._ws_url,
+                    on_open=self._on_ws_open,
+                    on_message=self._on_ws_message,
+                    on_error=self._on_ws_error,
+                    on_close=self._on_ws_close,
+                )
+                self._ws_thread = threading.Thread(
+                    target=self._ws.run_forever,
+                    kwargs={"ping_interval": 30, "ping_timeout": 10},
+                    daemon=True,
+                    name="ws-thread",
+                )
+                self._ws_thread.start()
+                if self._ws_connected.wait(timeout=15):
+                    logger.info(f"WebSocket 재연결 성공 ({len(codes)}종목 재구독)")
+                    self._ws_reconnect_attempts = 0
+                    # 이전 버전에서 WS 오류로 _api_error가 설정됐다면 해제
+                    self._api_error = False
+                    return
+                logger.warning("WebSocket 재연결 타임아웃")
+            except Exception as exc:
+                logger.error(f"WebSocket 재연결 오류: {exc}")
+        logger.error(
+            f"WebSocket 재연결 실패 ({max_attempts}회 초과) - 실시간 시세 중단"
+        )

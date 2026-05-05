@@ -38,6 +38,15 @@ logger = logging.getLogger(__name__)
 # 장전 뉴스 수집 시작 시각 (HH:MM)
 _PREMARKET_START_TIME = "0850"
 
+# S5 전략 평가 주기 (초). 매 N초마다 워치리스트 종목 평가
+_STRATEGY_TICK_SEC = 30
+
+# S5 진입 시작 시각 (모의 공격형: 09:20 → 09:10)
+_S5_ENTRY_TIME = "091000"
+
+# S1 진입 시작 시각 (모의 공격형: 09:15 → 09:05)
+_S1_ENTRY_TIME = "090500"
+
 
 class AutoTrader:
 
@@ -61,6 +70,12 @@ class AutoTrader:
         # S5 장전 준비 완료 여부
         self._premarket_done_today: str = ""   # "YYYYMMDD" 저장
         self._rl = RLAgentWrapper(model_path=None)  # 재학습 후 경로 지정
+
+        # S5 일봉 지표 캐시 {code: {"ma5": float, "vol_ma20": float, "prev_close": int}}
+        self._daily_indicators: dict[str, dict] = {}
+        self._last_strategy_tick = 0.0  # time.monotonic() 마지막 평가 시각
+        self._diag_tick_count = 0       # 진단 로그 주기 카운터 (10 tick = 5분)
+        self._last_balance_sync = 0.0   # KIS 잔고 마지막 재동기화 시각
 
         # 페이퍼 트레이딩 또는 실거래 주문 매니저
         if settings.is_paper:
@@ -92,13 +107,8 @@ class AutoTrader:
         if not settings.is_paper:
             self._sync_balance()
 
-        # 실시간 구독 (watch list는 별도 설정 필요)
-        watch_codes = self._get_watch_list()
-        if watch_codes:
-            self._api.subscribe_realtime(
-                codes=watch_codes,
-                on_price=self._on_realtime_price,
-            )
+        # 실시간 구독은 장전 준비(_run_premarket)에서 워치리스트만 체결가+호가
+        # 동시 구독. 시작 시점엔 WS 미연결 상태로 둠 (KIS WebSocket 한도 절약).
 
         # S5 섹터 대장주 캐시 초기화 (분기 만료 시 갱신)
         if settings.STRATEGY_S5_ENABLED:
@@ -122,14 +132,21 @@ class AutoTrader:
                 now = datetime.now()
                 time_str = now.strftime("%H%M%S")
 
-                # S5 장전 뉴스 수집 (08:50~09:00, 하루 1회)
+                # S5 장전 뉴스 수집 (08:50~09:00 정규 OR 09:00 이후 첫 시작 시 회복)
                 today_str = now.strftime("%Y%m%d")
+                hhmm = now.strftime("%H%M")
+                in_premarket_window = _PREMARKET_START_TIME <= hhmm < "0900"
+                late_recovery_window = "0900" <= hhmm <= "1430"
                 if (
                     settings.STRATEGY_S5_ENABLED
-                    and _PREMARKET_START_TIME <= now.strftime("%H%M") < "0900"
                     and self._premarket_done_today != today_str
+                    and (in_premarket_window or late_recovery_window)
                 ):
                     self._premarket_done_today = today_str
+                    if late_recovery_window:
+                        logger.warning(
+                            "[main] 장전 윈도우 지나서 시작됨 - 즉시 회복 실행"
+                        )
                     threading.Thread(
                         target=self._run_premarket,
                         daemon=True,
@@ -152,6 +169,37 @@ class AutoTrader:
                 # 체결 동기화 (실거래)
                 if self._order_mgr:
                     self._order_mgr.sync_filled_orders()
+
+                # KIS 잔고 주기적 재동기화 (5분 간격)
+                # 체결 누락/모의 시스템 드리프트로 portfolio와 실 잔고가
+                # 어긋날 때 자동 복구. paper 모드는 KIS 잔고 없으므로 스킵.
+                if (
+                    not settings.is_paper
+                    and time.monotonic() - self._last_balance_sync >= 300
+                ):
+                    self._last_balance_sync = time.monotonic()
+                    threading.Thread(
+                        target=self._sync_balance,
+                        daemon=True,
+                        name="balance-resync",
+                    ).start()
+
+                # 전략 평가 (09:15 S1 / 09:20 S5, _STRATEGY_TICK_SEC 간격)
+                if time_str >= _S1_ENTRY_TIME:
+                    now_mono = time.monotonic()
+                    if now_mono - self._last_strategy_tick >= _STRATEGY_TICK_SEC:
+                        self._last_strategy_tick = now_mono
+                        if settings.STRATEGY_S1_ENABLED:
+                            self._evaluate_s1_watchlist(time_str)
+                        if (
+                            settings.STRATEGY_S5_ENABLED
+                            and time_str >= _S5_ENTRY_TIME
+                        ):
+                            self._evaluate_s5_watchlist(time_str)
+                        # 5분마다 워치리스트 상태 한 줄 진단
+                        self._diag_tick_count += 1
+                        if self._diag_tick_count % 10 == 0:
+                            self._log_eval_diagnostic(time_str)
 
                 # 장 마감 전 일일 리포트 (15:30)
                 if "153000" <= time_str <= "153100":
@@ -235,6 +283,12 @@ class AutoTrader:
     def _sync_balance(self) -> None:
         try:
             balance = self._api.get_balance()
+            # 1. PortfolioManager에 포지션/현금 복원 (재시작 후 이어받기)
+            self._portfolio.sync_from_balance(
+                cash=balance.cash,
+                positions=balance.positions,
+            )
+            # 2. RiskManager도 동기화
             self._risk.update_portfolio_state(
                 total_eval=balance.total_eval,
                 cash=balance.cash,
@@ -242,8 +296,17 @@ class AutoTrader:
             )
             logger.info(
                 f"잔고 동기화 | 총 평가={balance.total_eval:,.0f}원 "
-                f"| 현금={balance.cash:,.0f}원"
+                f"| 현금={balance.cash:,.0f}원 "
+                f"| 포지션={len(balance.positions)}개"
             )
+            for p in balance.positions:
+                # KIS evlu_pfls_rt 는 이미 %단위(0.84 = 0.84%) 라서
+                # f-string의 :% (×100)을 사용하지 않고 :+.2f 로 그대로 표시
+                logger.info(
+                    f"  보유: {p.name}({p.code}) {p.quantity}주 "
+                    f"@평단{p.avg_price:,.0f}원 (현재 {p.current_price:,}원, "
+                    f"손익 {p.profit_loss_rate:+.2f}%)"
+                )
         except Exception as exc:
             logger.error(f"잔고 동기화 실패: {exc}")
 
@@ -253,15 +316,284 @@ class AutoTrader:
             logger.info("[main] S5 장전 준비 시작")
             watchlist = self._strategy.prepare_premarket()
             if watchlist:
-                # 기존 구독에 S5 워치리스트 추가
+                # 워치리스트 종목만 체결가 + 호가 동시 구독
+                # (KIS WebSocket 한도 절약 + S1 매수세 필터 활성화)
                 self._api.subscribe_realtime(
                     codes=watchlist,
                     on_price=self._on_realtime_price,
+                    on_orderbook=self._on_realtime_orderbook,
                 )
-                logger.info("[main] S5 워치리스트 WebSocket 구독: %s", watchlist)
-            self._notifier.send(f"S5 장전 준비 완료 | {len(watchlist)}종목 선정")
+                logger.info(
+                    "[main] 워치리스트 WebSocket 구독 (체결가+호가): %s", watchlist
+                )
+                # 일봉 지표 프리로드 (ma5, ma20, vol_ma20)
+                self._preload_daily_indicators(watchlist)
+            # 장전 준비 완료는 로컬 로그만 (슬랙 푸시 X - 노이즈 줄임)
+            logger.info("[main] S5 장전 준비 완료 | %d종목 선정", len(watchlist))
         except Exception as exc:
             logger.error("[main] S5 장전 준비 오류: %s", exc, exc_info=True)
+
+    def _on_realtime_orderbook(self, code: str, data: dict) -> None:
+        """WebSocket 호가 콜백 → MarketDataCollector 캐시 갱신."""
+        self._data.on_orderbook(code, data)
+
+    def _preload_daily_indicators(self, codes: list[str]) -> None:
+        """워치리스트 종목의 일봉 지표(ma5, vol_ma20, prev_close)를 캐시.
+        파케이 캐시 우선, 없으면 KIS API 호출."""
+        from datetime import timedelta as _td
+        from core.market_data_collector import MarketDataCollector
+
+        for code in codes:
+            try:
+                df = self._data.load_daily_ohlcv(code, days=30)
+                if df is None or len(df) < 20:
+                    # 캐시 없으면 API로 직접 조회 (최근 30영업일)
+                    today = datetime.now().strftime("%Y%m%d")
+                    start = (datetime.now() - _td(days=60)).strftime("%Y%m%d")
+                    rows = self._api.get_daily_ohlcv(code, start, today)
+                    if not rows:
+                        logger.warning("[main] %s 일봉 조회 결과 없음", code)
+                        continue
+                    import pandas as pd
+                    df = pd.DataFrame(rows)
+                if df is None or df.empty:
+                    continue
+                df = MarketDataCollector.calc_indicators(df)
+                last = df.iloc[-1]
+                self._daily_indicators[code] = {
+                    "ma5": float(last.get("ma5", 0) or 0),
+                    "ma20": float(last.get("ma20", 0) or 0),
+                    "vol_ma20": float(last.get("vol_ma20", 0) or 0),
+                    "prev_close": int(last.get("close", 0) or 0),
+                }
+                logger.info(
+                    "[main] %s 지표 로드: ma5=%.0f, ma20=%.0f, vol_ma20=%.0f, prev_close=%d",
+                    code,
+                    self._daily_indicators[code]["ma5"],
+                    self._daily_indicators[code]["ma20"],
+                    self._daily_indicators[code]["vol_ma20"],
+                    self._daily_indicators[code]["prev_close"],
+                )
+            except Exception as exc:
+                logger.warning("[main] %s 지표 프리로드 실패: %s", code, exc)
+
+    def _evaluate_s5_watchlist(self, time_str: str) -> None:
+        """S5 워치리스트 평가 + 시그널 발생 시 주문 발주."""
+        watchlist = self._strategy.get_s5_watchlist()
+        if not watchlist:
+            return
+
+        evaluated = 0
+        for code in watchlist:
+            try:
+                price = self._data.get_last_price(code)
+                if not price:
+                    continue
+                today_bar = self._data.get_today_ohlcv(code) or {}
+                indicators = self._daily_indicators.get(code, {})
+                prev_close = indicators.get("prev_close", 0)
+                vol_ma20 = indicators.get("vol_ma20", 0)
+                today_volume = today_bar.get("volume", 0)
+                vol_ratio = (today_volume / vol_ma20) if vol_ma20 > 0 else 0.0
+                change_rate = (
+                    (price - prev_close) / prev_close if prev_close > 0 else 0.0
+                )
+                gap_rate = (
+                    (today_bar.get("open", price) - prev_close) / prev_close
+                    if prev_close > 0 else 0.0
+                )
+
+                row = {
+                    "close": price,
+                    "ma5": indicators.get("ma5", 0),
+                    "vol_ratio": vol_ratio,
+                    "gap_rate": gap_rate,
+                    "change_rate": change_rate,
+                    "time": time_str,
+                }
+
+                pos = self._portfolio.positions.get(code)
+                state = {
+                    "position_qty": pos.quantity if pos else 0,
+                    "avg_price": pos.avg_price if pos else 0.0,
+                    "entry_date": getattr(pos, "entry_date", None) if pos else None,
+                    "cash": self._portfolio.cash,
+                }
+
+                signal = self._strategy.evaluate_s5(code, row, state)
+                evaluated += 1
+                if signal:
+                    self._handle_signal(signal, state)
+            except Exception as exc:
+                logger.error("[main] %s 전략 평가 오류: %s", code, exc, exc_info=True)
+        logger.debug("[main] S5 평가 완료: %d종목", evaluated)
+
+    def _evaluate_s1_watchlist(self, time_str: str) -> None:
+        """S1 워치리스트 평가 (옵션A: S5 워치리스트 공유, 호가는 0=조건4 자동통과)."""
+        watchlist = self._strategy.get_s5_watchlist()  # 일단 S5와 공유
+        if not watchlist:
+            return
+
+        for code in watchlist:
+            try:
+                price = self._data.get_last_price(code)
+                if not price:
+                    continue
+                today_bar = self._data.get_today_ohlcv(code) or {}
+                indicators = self._daily_indicators.get(code, {})
+                prev_close = indicators.get("prev_close", 0)
+                vol_ma20 = indicators.get("vol_ma20", 0)
+                today_volume = today_bar.get("volume", 0)
+                vol_ratio = (today_volume / vol_ma20) if vol_ma20 > 0 else 0.0
+
+                price_data = {
+                    "current_price": price,
+                    "open": today_bar.get("open", price),
+                    "high": today_bar.get("high", price),
+                    "low": today_bar.get("low", price),
+                    "prev_close": prev_close,
+                    "volume": today_volume,
+                }
+                ind = {
+                    "ma5": indicators.get("ma5", 0),
+                    "ma20": indicators.get("ma20", 0),
+                    "vol_ma20": vol_ma20,
+                    "vol_ratio": vol_ratio,
+                }
+                # 호가 캐시에서 읽어옴. 미수신 시 0(자동 PASS) 폴백.
+                ob_cache = self._data.get_orderbook(code)
+                ob = {
+                    "ask1": ob_cache.get("ask1", 0),
+                    "bid1": ob_cache.get("bid1", 0),
+                    "bid_qty_sum": ob_cache.get("bid_qty_sum", 0),
+                    "ask_qty_sum": ob_cache.get("ask_qty_sum", 0),
+                }
+
+                pos = self._portfolio.positions.get(code)
+                signal = self._strategy.evaluate_s1(
+                    code=code,
+                    name=pos.name if pos else code,
+                    price_data=price_data,
+                    indicators=ind,
+                    orderbook=ob,
+                    current_time=time_str,
+                    position_qty=pos.quantity if pos else 0,
+                    avg_entry_price=pos.avg_price if pos else 0.0,
+                )
+                if signal:
+                    state = {
+                        "position_qty": pos.quantity if pos else 0,
+                        "avg_price": pos.avg_price if pos else 0.0,
+                        "cash": self._portfolio.cash,
+                    }
+                    self._handle_signal(signal, state)
+            except Exception as exc:
+                logger.error("[main] %s S1 평가 오류: %s", code, exc, exc_info=True)
+
+    def _log_eval_diagnostic(self, time_str: str) -> None:
+        """5분마다 워치리스트 종목 상태를 INFO 로그로 출력 (진입 차단 원인 추적용)."""
+        watchlist = self._strategy.get_s5_watchlist()
+        if not watchlist:
+            logger.info("[진단] 워치리스트 비어있음")
+            return
+        for code in watchlist:
+            price = self._data.get_last_price(code)
+            today_bar = self._data.get_today_ohlcv(code) or {}
+            ind = self._daily_indicators.get(code, {})
+            ma5 = ind.get("ma5", 0)
+            vol_ma20 = ind.get("vol_ma20", 0)
+            prev_close = ind.get("prev_close", 0)
+            today_volume = today_bar.get("volume", 0)
+            vol_ratio = (today_volume / vol_ma20) if vol_ma20 > 0 else 0.0
+            change = (
+                (price - prev_close) / prev_close * 100
+                if (price and prev_close) else 0.0
+            )
+            ma5_status = (
+                "위" if (price and ma5 and price > ma5)
+                else ("아래" if (price and ma5) else "?")
+            )
+            logger.info(
+                "[진단 %s] %s 가격=%s ma5=%.0f(%s) vol_ratio=%.2fx (S1≥1.5/S5≥2.0) 변동=%+.1f%%",
+                time_str[:6], code,
+                f"{price:,}" if price else "수신X",
+                ma5, ma5_status, vol_ratio, change,
+            )
+
+    def _handle_signal(self, signal, state: dict) -> None:
+        """전략 시그널 → 주문 발주 (paper / live mock).
+        매수 시 _portfolio.cash 기준으로 같은 tick 내 누적 발주를 방지."""
+        from config.constants import S5_PARAMS
+        from strategies.base_strategy import Signal as SignalEnum
+
+        if signal.signal == SignalEnum.BUY:
+            available = self._portfolio.cash  # 실시간 가용 현금
+            # 1회 비중 vs 실가용 중 작은 쪽 사용
+            budget = min(state["cash"] * S5_PARAMS["position_ratio"], available)
+            qty = int(budget // signal.price)
+            required = qty * signal.price * 1.01  # 1% 수수료/슬리피지 버퍼
+            if qty <= 0 or required > available:
+                logger.warning(
+                    "[main] %s 매수 스킵 (가용=%d, 필요=%d)",
+                    signal.code, int(available), int(required),
+                )
+                return
+            # 즉시 가용현금 차감 (낙관적 reservation - 실패시 sync_balance가 복원)
+            self._portfolio._cash -= required
+        else:
+            # 매도: 시그널의 quantity 우선, 없으면 보유 × sell_ratio
+            qty = signal.quantity or int(
+                state["position_qty"] * (signal.sell_ratio or 1.0)
+            )
+            if qty <= 0:
+                return
+
+        side_str = "매수" if signal.signal == SignalEnum.BUY else "매도"
+
+        if self._paper:
+            paper_order = self._paper.place_order(signal, qty)
+            if paper_order:
+                self._notifier.send(
+                    f"{side_str} 주문 | {signal.name}({signal.code}) "
+                    f"{qty}주 @{signal.price:,}원 [{signal.strategy}]",
+                    level="TRADE",
+                )
+        elif self._order_mgr:
+            if signal.signal == SignalEnum.BUY:
+                order = self._order_mgr.place_buy(
+                    strategy=signal.strategy,
+                    code=signal.code,
+                    name=signal.name,
+                    quantity=qty,
+                    price=signal.price,
+                )
+            else:
+                order = self._order_mgr.place_sell(
+                    strategy=signal.strategy,
+                    code=signal.code,
+                    name=signal.name,
+                    quantity=qty,
+                    price=signal.price,
+                )
+            # 발주 성공 시 즉시 슬랙 (체결 콜백 notify_trade는 별도로 발송)
+            if order is not None:
+                self._notifier.send(
+                    f"{side_str} 주문 | {signal.name}({signal.code}) "
+                    f"{qty}주 @{signal.price:,}원 [{signal.strategy}] - {signal.reason}",
+                    level="TRADE",
+                )
+            # 매도 주문 실패 시 KIS 잔고와 어긋났을 가능성 → 즉시 재동기화
+            # (대표 사례: KIS 40240000 "모의투자 잔고내역이 없습니다")
+            if order is None and signal.signal == SignalEnum.SELL:
+                logger.warning(
+                    "[main] 매도 주문 실패 → KIS 잔고 재동기화 트리거"
+                )
+                self._last_balance_sync = time.monotonic()
+                threading.Thread(
+                    target=self._sync_balance,
+                    daemon=True,
+                    name="balance-resync-on-fail",
+                ).start()
 
     def _get_watch_list(self) -> list[str]:
         """감시 종목 목록. S5 워치리스트는 장전 스레드에서 동적 추가."""
