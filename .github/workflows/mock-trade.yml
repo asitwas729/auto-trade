@@ -1,0 +1,110 @@
+name: Auto Trade (mock)
+
+on:
+  schedule:
+    # 한국시간 평일 08:30 = UTC 23:30 일~목 (KST가 UTC보다 +9h)
+    # KST 월 08:30 → UTC 일 23:30
+    # KST 화 08:30 → UTC 월 23:30
+    # ...
+    # KST 금 08:30 → UTC 목 23:30
+    - cron: '30 23 * * 0,1,2,3,4'
+  # 수동 실행도 가능
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: '로그 레벨 (DEBUG/INFO)'
+        required: false
+        default: 'INFO'
+
+# 동시 실행 방지 - 같은 KIS 모의계좌에 두 개 동시 가동 시 충돌
+concurrency:
+  group: auto-trade-mock
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    # KRX 09:00~15:30 = 6.5h. GHA 단일 잡 한도 6h이므로 마감 전 최대 30분 손실 가능.
+    timeout-minutes: 360
+
+    env:
+      TZ: Asia/Seoul
+      TRADING_MODE: mock
+      INITIAL_CAPITAL: '10000000'
+      LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
+      # KIS 자격증명
+      KIS_MOCK_APP_KEY: ${{ secrets.KIS_MOCK_APP_KEY }}
+      KIS_MOCK_APP_SECRET: ${{ secrets.KIS_MOCK_APP_SECRET }}
+      KIS_MOCK_ACCOUNT_NO: ${{ secrets.KIS_MOCK_ACCOUNT_NO }}
+      KIS_ACCOUNT_PRODUCT: ${{ secrets.KIS_ACCOUNT_PRODUCT }}
+      # 알림 (선택)
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # 뉴스 (S5 전략용)
+      NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+      NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+      # 전략 ON/OFF
+      STRATEGY_S1_ENABLED: 'true'
+      STRATEGY_S2_ENABLED: 'false'
+      STRATEGY_S3_ENABLED: 'false'
+      STRATEGY_S5_ENABLED: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore data cache (sector leaders, token)
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/sector_leaders_cache.json
+            data/.kis_token_mock.json
+          key: auto-trade-data-${{ github.run_id }}
+          restore-keys: |
+            auto-trade-data-
+
+      - name: Holiday gate (KRX 거래일 확인)
+        id: gate
+        continue-on-error: true
+        run: python scripts/should_run_today.py
+
+      - name: Skip notice (휴장일/주말)
+        if: steps.gate.outcome != 'success'
+        run: |
+          echo "오늘은 KRX 거래일이 아니므로 매매를 건너뜁니다."
+
+      - name: Run AutoTrader
+        if: steps.gate.outcome == 'success'
+        # 14:30 KST 부근에 GHA 6h 한도로 강제 종료될 수 있음. main.py의
+        # SIGTERM 핸들러가 미체결 주문 취소 후 정상 종료 시도.
+        timeout-minutes: 350
+        run: python main.py
+
+      - name: Save data cache (always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/sector_leaders_cache.json
+            data/.kis_token_mock.json
+          key: auto-trade-data-${{ github.run_id }}
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-trade-logs-${{ github.run_id }}
+          path: |
+            logs/
+          retention-days: 14
+          if-no-files-found: ignore
