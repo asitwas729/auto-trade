@@ -18,6 +18,8 @@ from typing import Callable, Optional
 
 from config.constants import (
     COMMISSION_RATE,
+    FORCED_CLOSE_RETRY_DELAY_SEC,
+    FORCED_CLOSE_RETRY_MAX,
     TICK_SIZE_TABLE,
     TRANSACTION_TAX_RATE,
     UNFILLED_ORDER_TIMEOUT_SEC,
@@ -58,6 +60,8 @@ class Order:
     submitted_at: Optional[datetime] = None
     filled_at: Optional[datetime] = None
     cancel_reason: str = ""
+    is_forced_close: bool = False    # 강제청산 시그널 (시장가 + 부분체결 재시도)
+    retry_count: int = 0             # 부분체결 시장가 재발주 카운트
 
     @property
     def is_market_order(self) -> bool:
@@ -141,8 +145,12 @@ class OrderManager:
         quantity: int,
         price: int = 0,
         cancel_reason: str = "",
+        is_forced_close: bool = False,
     ) -> Optional[Order]:
-        """매도 주문 (손절/익절). 리스크 매니저 통과 후 실행."""
+        """
+        매도 주문 (손절/익절).
+        is_forced_close=True: KIS API에 시장가 강제 + 부분체결 시 잔량 재발주.
+        """
         amount = price * quantity if price > 0 else 0.0
 
         validation = self._risk.check_order(strategy, code, "SELL", amount)
@@ -161,6 +169,7 @@ class OrderManager:
             price=price,
             amount=amount,
             cancel_reason=cancel_reason,
+            is_forced_close=is_forced_close,
         )
         return self._submit(order)
 
@@ -171,7 +180,8 @@ class OrderManager:
             )
         else:
             result: OrderResult = self._api.sell(
-                order.code, order.quantity, order.price
+                order.code, order.quantity, order.price,
+                is_forced_close=order.is_forced_close,
             )
 
         if not result.success:
@@ -198,7 +208,9 @@ class OrderManager:
     # ─────────────────────────────────────────────────────────────
 
     def sync_filled_orders(self) -> None:
-        """KIS API로 체결 목록 조회 후 활성 주문 상태 갱신. 주기적 호출 필요."""
+        """KIS API로 체결 목록 조회 후 활성 주문 상태 갱신. 주기적 호출 필요.
+        강제청산(is_forced_close) 주문이 부분체결로 끝나면 잔량을 시장가로
+        자동 재발주 (최대 FORCED_CLOSE_RETRY_MAX 회)."""
         if not self._active_orders:
             return
 
@@ -209,6 +221,7 @@ class OrderManager:
             return
 
         filled_map = {f.order_no: f for f in filled_list}
+        retry_orders: list[Order] = []
 
         with self._lock:
             for order_no, order in list(self._active_orders.items()):
@@ -230,6 +243,49 @@ class OrderManager:
                         self._on_fill(order)
                 elif filled.filled_qty > 0:
                     order.status = OrderStatus.PARTIAL
+                    # 강제청산 부분체결 → 잔량 시장가 재발주 큐잉
+                    if (
+                        order.is_forced_close
+                        and order.side == OrderSide.SELL
+                        and order.retry_count < FORCED_CLOSE_RETRY_MAX
+                    ):
+                        retry_orders.append(order)
+
+        # 재발주는 락 밖에서 (HTTP 호출이라 시간 걸림)
+        for order in retry_orders:
+            self._retry_forced_close(order)
+
+    def _retry_forced_close(self, order: Order) -> None:
+        """강제청산 부분체결 → 잔량 시장가 재발주."""
+        remaining = order.quantity - order.filled_qty
+        if remaining <= 0:
+            return
+        with self._lock:
+            # 기존 active 항목에서 제거 (재발주가 신규 order_no 받음)
+            self._active_orders.pop(order.order_no, None)
+
+        time.sleep(FORCED_CLOSE_RETRY_DELAY_SEC)
+        new_order = Order(
+            strategy=order.strategy,
+            code=order.code,
+            name=order.name,
+            side=OrderSide.SELL,
+            quantity=remaining,
+            price=0,
+            amount=0.0,
+            is_forced_close=True,
+            retry_count=order.retry_count + 1,
+        )
+        logger.warning(
+            f"강제청산 부분체결 재시도 #{new_order.retry_count}"
+            f" | {order.name}({order.code}) 잔량 {remaining}주 시장가"
+        )
+        result = self._submit(new_order)
+        if result is None and new_order.retry_count >= FORCED_CLOSE_RETRY_MAX:
+            logger.error(
+                f"🔴 강제청산 실패 (재시도 {FORCED_CLOSE_RETRY_MAX}회 초과)"
+                f" | {order.name}({order.code}) 잔량 {remaining}주"
+            )
 
     # ─────────────────────────────────────────────────────────────
     # 미체결 타임아웃 감시

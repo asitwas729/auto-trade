@@ -104,6 +104,11 @@ class Settings:
     STRATEGY_S2_ENABLED: bool = _optional("STRATEGY_S2_ENABLED", "true").lower() == "true"
     STRATEGY_S3_ENABLED: bool = _optional("STRATEGY_S3_ENABLED", "true").lower() == "true"
     STRATEGY_S5_ENABLED: bool = _optional("STRATEGY_S5_ENABLED", "true").lower() == "true"
+    # 시간대별 신규 전략 (단계적 활성화)
+    STRATEGY_S6_ENABLED: bool = _optional("STRATEGY_S6_ENABLED", "true").lower() == "true"
+    STRATEGY_S7_ENABLED: bool = _optional("STRATEGY_S7_ENABLED", "true").lower() == "true"
+    STRATEGY_S8_ENABLED: bool = _optional("STRATEGY_S8_ENABLED", "true").lower() == "true"
+    STRATEGY_S9_ENABLED: bool = _optional("STRATEGY_S9_ENABLED", "true").lower() == "true"
 
     # ─── Naver Open API (뉴스 수집용) ────────────────────────────
     NAVER_CLIENT_ID: str     = _optional("NAVER_CLIENT_ID")
