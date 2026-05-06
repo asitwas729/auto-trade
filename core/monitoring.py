@@ -133,12 +133,36 @@ class Notifier:
         self.send(event, level="ERROR")
 
     def send_daily_report(self, summary: dict) -> None:
-        msg = (
-            f"[일일 리포트] {datetime.now().strftime('%Y-%m-%d')}\n"
-            f"총 평가금액: {summary.get('total_eval', 0):,.0f}원\n"
-            f"현금: {summary.get('cash', 0):,.0f}원\n"
-            f"미실현손익: {summary.get('total_unrealized_pnl', 0):+,.0f}원\n"
-            f"실현손익: {summary.get('total_realized_pnl', 0):+,.0f}원\n"
-            f"총 수익률: {summary.get('total_return_rate', 0):+.2%}"
-        )
+        lines = [
+            f"[일일 리포트] {datetime.now().strftime('%Y-%m-%d')}",
+            f"총 평가금액: {summary.get('total_eval', 0):,.0f}원",
+            f"현금: {summary.get('cash', 0):,.0f}원",
+            f"미실현손익: {summary.get('total_unrealized_pnl', 0):+,.0f}원",
+            f"실현손익: {summary.get('total_realized_pnl', 0):+,.0f}원",
+            f"총 수익률: {summary.get('total_return_rate', 0):+.2%}",
+        ]
+
+        positions = summary.get("positions_detail", []) or []
+        if positions:
+            lines.append("")
+            lines.append(f"보유 종목 ({len(positions)}건):")
+            for p in positions:
+                lines.append(
+                    f"  ▸ {p['name']}({p['code']}) {p['quantity']}주 "
+                    f"@{p['avg_price']:,.0f}원 → {p['current_price']:,}원 "
+                    f"({p['pnl_rate']:+.2%})"
+                )
+
+        fills = summary.get("today_fills", []) or []
+        if fills:
+            lines.append("")
+            lines.append(f"오늘 거래 ({len(fills)}건):")
+            for f in fills:
+                side_kr = "매수" if f["side"] == "BUY" else "매도"
+                lines.append(
+                    f"  {f['time']} {side_kr} | {f['name']}({f['code']}) "
+                    f"{f['qty']}주 @{f['price']:,.0f}원"
+                )
+
+        msg = "\n".join(lines)
         self.send(msg, level="INFO")

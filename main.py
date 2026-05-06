@@ -604,6 +604,57 @@ class AutoTrader:
 
     def _send_daily_report(self) -> None:
         summary = self._portfolio.get_summary()
+
+        # 보유 포지션 상세 (현재 KIS 잔고 = portfolio 동기화 상태)
+        summary["positions_detail"] = [
+            {
+                "code": p.code,
+                "name": p.name,
+                "quantity": p.quantity,
+                "avg_price": p.avg_price,
+                "current_price": p.current_price,
+                "pnl_rate": (
+                    (p.current_price - p.avg_price) / p.avg_price
+                    if p.avg_price > 0 else 0.0
+                ),
+            }
+            for p in self._portfolio.positions.values()
+        ]
+
+        # 오늘 체결 이력 — KIS 서버에서 직접 조회 (재시작에도 무관)
+        # paper 모드는 _paper.get_filled_orders() 사용
+        today_fills = []
+        if self._order_mgr:  # live mock
+            try:
+                fills = self._api.get_filled_orders()
+                today_fills = [
+                    {
+                        "time": f.filled_at.strftime("%H:%M"),
+                        "code": f.code,
+                        "name": f.name,
+                        "side": f.side,
+                        "qty": f.filled_qty,
+                        "price": f.avg_filled_price,
+                    }
+                    for f in fills
+                ]
+            except Exception as exc:
+                logger.warning("오늘 체결 조회 실패: %s", exc)
+        elif self._paper:
+            today_fills = [
+                {
+                    "time": o.filled_at.strftime("%H:%M") if o.filled_at else "",
+                    "code": o.code,
+                    "name": o.name,
+                    "side": o.side,
+                    "qty": o.quantity,
+                    "price": o.filled_price,
+                }
+                for o in self._paper.get_filled_orders()
+                if o.filled
+            ]
+        summary["today_fills"] = today_fills
+
         self._notifier.send_daily_report(summary)
 
     def _shutdown(self, signum, frame) -> None:
