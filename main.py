@@ -97,6 +97,8 @@ class AutoTrader:
         # 마감 sweep + S9 익일 청산
         self._closeout_sweep_done_today: str = ""
         self._s9_overnight_exit_done_today: str = ""
+        # 일일 리포트 중복 발송 방지 (15:30 1회 + 마감 종료시 fallback)
+        self._daily_report_sent_today: str = ""
 
         # 페이퍼 트레이딩 또는 실거래 주문 매니저
         if settings.is_paper:
@@ -184,8 +186,18 @@ class AutoTrader:
                         name="s5-premarket",
                     ).start()
 
-                # 장 시간 내에만 동작 (09:00~15:35)
-                if not ("090000" <= time_str <= "153500"):
+                # 장 마감 후: 일일 리포트 1회 발송 + 정상 종료
+                # (GHA 6h 타임아웃까지 무한 대기 방지 — 14:25 핸드오프 잡이
+                #  20:30까지 도는 문제 차단)
+                if time_str > "153500":
+                    logger.info("[main] 장 마감 - 정상 종료")
+                    if self._daily_report_sent_today != today_str:
+                        self._send_daily_report()
+                        self._daily_report_sent_today = today_str
+                    self._running = False
+                    break
+                # 장 시작 전: 1분 슬립 후 다시 체크
+                if time_str < "090000":
                     time.sleep(60)
                     continue
 
@@ -304,9 +316,13 @@ class AutoTrader:
                         name="closeout-sweep",
                     ).start()
 
-                # 장 마감 전 일일 리포트 (15:30)
-                if "153000" <= time_str <= "153100":
+                # 장 마감 전 일일 리포트 (15:30 1회만)
+                if (
+                    "153000" <= time_str <= "153100"
+                    and self._daily_report_sent_today != today_str
+                ):
                     self._send_daily_report()
+                    self._daily_report_sent_today = today_str
 
                 time.sleep(1)
 
