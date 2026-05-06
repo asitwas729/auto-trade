@@ -76,6 +76,7 @@ class AutoTrader:
         self._last_strategy_tick = 0.0  # time.monotonic() 마지막 평가 시각
         self._diag_tick_count = 0       # 진단 로그 주기 카운터 (10 tick = 5분)
         self._last_balance_sync = 0.0   # KIS 잔고 마지막 재동기화 시각
+        self._day_start_eval = 0.0      # 오늘 시작 평가금액 (오늘 수익률 기준)
 
         # 페이퍼 트레이딩 또는 실거래 주문 매니저
         if settings.is_paper:
@@ -106,6 +107,9 @@ class AutoTrader:
         # 잔고 동기화
         if not settings.is_paper:
             self._sync_balance()
+
+        # 오늘 시작 평가금액 로드/저장 (today 수익률 기준점)
+        self._initialize_day_start()
 
         # 실시간 구독은 장전 준비(_run_premarket)에서 워치리스트만 체결가+호가
         # 동시 구독. 시작 시점엔 WS 미연결 상태로 둠 (KIS WebSocket 한도 절약).
@@ -602,8 +606,53 @@ class AutoTrader:
             return self._strategy.sector_manager.get_watchlist()
         return []
 
+    def _initialize_day_start(self) -> None:
+        """오늘 시작 평가금액 로드 또는 신규 저장.
+        14:25 핸드오프 잡에서도 같은 날짜면 같은 기준값 유지."""
+        import json as _json
+        today_str = datetime.now().strftime("%Y%m%d")
+        cache_path = settings.DATA_DIR / "day_start_eval.json"
+        try:
+            if cache_path.exists():
+                data = _json.loads(cache_path.read_text(encoding="utf-8"))
+                if data.get("date") == today_str:
+                    self._day_start_eval = float(data["eval"])
+                    logger.info(
+                        "[main] 오늘 시작 평가금액 로드: %.0f원",
+                        self._day_start_eval,
+                    )
+                    return
+        except Exception as exc:
+            logger.warning(f"[main] day_start 로드 실패: {exc}")
+
+        # 신규 저장 (날짜 바뀜 또는 첫 실행)
+        self._day_start_eval = float(self._portfolio.total_eval)
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                _json.dumps({"date": today_str, "eval": self._day_start_eval}),
+                encoding="utf-8",
+            )
+            logger.info(
+                "[main] 오늘 시작 평가금액 저장: %.0f원",
+                self._day_start_eval,
+            )
+        except Exception as exc:
+            logger.warning(f"[main] day_start 저장 실패: {exc}")
+
     def _send_daily_report(self) -> None:
         summary = self._portfolio.get_summary()
+
+        # 오늘 수익률 (시작 평가금액 대비)
+        if self._day_start_eval > 0:
+            today_pnl = summary["total_eval"] - self._day_start_eval
+            summary["today_pnl"] = today_pnl
+            summary["today_return_rate"] = today_pnl / self._day_start_eval
+            summary["day_start_eval"] = self._day_start_eval
+        else:
+            summary["today_pnl"] = 0.0
+            summary["today_return_rate"] = 0.0
+            summary["day_start_eval"] = 0.0
 
         # 보유 포지션 상세 (현재 KIS 잔고 = portfolio 동기화 상태)
         summary["positions_detail"] = [

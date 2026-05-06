@@ -138,9 +138,18 @@ class Notifier:
             f"총 평가금액: {summary.get('total_eval', 0):,.0f}원",
             f"현금: {summary.get('cash', 0):,.0f}원",
             f"미실현손익: {summary.get('total_unrealized_pnl', 0):+,.0f}원",
-            f"실현손익: {summary.get('total_realized_pnl', 0):+,.0f}원",
-            f"총 수익률: {summary.get('total_return_rate', 0):+.2%}",
         ]
+        # 오늘 손익 (day_start_eval 기준)
+        if summary.get("day_start_eval", 0) > 0:
+            lines.append(
+                f"오늘 손익: {summary.get('today_pnl', 0):+,.0f}원 "
+                f"({summary.get('today_return_rate', 0):+.2%}) "
+                f"(시작 {summary.get('day_start_eval', 0):,.0f}원)"
+            )
+        lines.append(
+            f"누적 수익률: {summary.get('total_return_rate', 0):+.2%} "
+            f"(시작자본 대비)"
+        )
 
         positions = summary.get("positions_detail", []) or []
         if positions:
