@@ -19,6 +19,10 @@ from core.order_manager import round_to_tick
 from strategies.base_strategy import Signal
 from strategies.s1_open_volatility import S1OpenVolatility
 from strategies.s2_gap_news import S2GapNews
+from strategies.s6_breakout import S6Breakout
+from strategies.s7_pullback import S7Pullback
+from strategies.s8_afternoon_trend import S8AfternoonTrend
+from strategies.s9_close_bet import S9CloseBet
 
 
 REQUIRED_COLUMNS = {"date", "time", "open", "high", "low", "close", "volume"}
@@ -27,7 +31,11 @@ REQUIRED_COLUMNS = {"date", "time", "open", "high", "low", "close", "volume"}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run an intraday backtest from minute OHLCV CSV.")
     parser.add_argument("--csv", required=True, help="Path to minute OHLCV CSV file")
-    parser.add_argument("--strategy", default="S1", choices=["S1", "S2"], help="Intraday strategy name")
+    parser.add_argument(
+        "--strategy", default="S1",
+        choices=["S1", "S2", "S6", "S7", "S8", "S9"],
+        help="Intraday strategy name",
+    )
     parser.add_argument("--capital", type=float, default=10_000_000, help="Initial capital")
     parser.add_argument("--position-ratio", type=float, default=0.25, help="Capital ratio per entry")
     parser.add_argument("--code", default="TEST", help="Code label")
@@ -96,10 +104,23 @@ def run_intraday_backtest(
     initial_capital: float,
     position_ratio: float,
 ) -> BTResult:
+    # 신규 전략들은 make_bt_func 경로로 처리 (다른 evaluate 시그니처)
+    new_strategy_makers = {
+        "S6": lambda: S6Breakout(),
+        "S7": lambda: S7Pullback(),
+        "S8": lambda: S8AfternoonTrend(),
+        "S9": lambda: S9CloseBet(),
+    }
+
     if strategy_name == "S1":
         strategy = S1OpenVolatility()
+        bt_func = None
     elif strategy_name == "S2":
         strategy = S2GapNews()
+        bt_func = None
+    elif strategy_name in new_strategy_makers:
+        strategy = new_strategy_makers[strategy_name]()
+        bt_func = strategy.make_bt_func()
     else:
         raise ValueError(f"Unsupported intraday strategy: {strategy_name}")
 
@@ -124,7 +145,29 @@ def run_intraday_backtest(
         if position_qty > 0:
             high_since_entry = max(high_since_entry, bar_high)
 
-        if strategy_name == "S1":
+        if bt_func is not None:
+            # S6/S7/S8/S9 — make_bt_func 경로
+            row_dict = dict(row)
+            row_dict["code"] = code
+            row_dict["name"] = name
+            row_dict["time"] = current_time
+            row_dict.setdefault("today_open", session_open)
+            row_dict.setdefault("today_high", session_high)
+            row_dict.setdefault("opening_range_high", session_high)
+            row_dict.setdefault("prev_day_high", session_high)
+            row_dict.setdefault("three_min_up_ratio", 0.7)
+            state = {
+                "position_qty": position_qty,
+                "avg_price": avg_price,
+                "now_dt": row.get("datetime"),
+            }
+            sig_name = bt_func(row_dict, state)
+            from strategies.base_strategy import StrategySignal as _SS
+            signal = _SS(
+                signal=Signal[sig_name], code=code, name=name, price=price,
+                strategy=strategy_name,
+            ) if sig_name else None
+        elif strategy_name == "S1":
             signal = strategy.evaluate(
                 code=code,
                 name=name,

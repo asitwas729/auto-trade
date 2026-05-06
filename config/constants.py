@@ -57,7 +57,7 @@ REBALANCE_LOOKBACK_TRADES = 20      # 최근 N 트레이드 기준
 
 # ─── 전략별 파라미터 ──────────────────────────────────────────────
 S1_PARAMS = {
-    "entry_after": "090500",        # 09:15 → 09:05 (장 시작 직후)
+    "entry_after": "090000",        # 09:15 → 09:00 (장 개장 즉시)
     "profit_target_1": 0.005,       # +1% → +0.5% (빠른 1차 익절)
     "profit_target_2": 0.012,       # +2% → +1.2%
     "stop_loss_low": True,
@@ -91,7 +91,7 @@ S4_PARAMS = {
 
 S5_PARAMS = {
     # 모의투자 공격형 (실거래 전 백테스트로 재검증 필수)
-    "entry_time": "091000",         # 09:20 → 09:10
+    "entry_time": "090000",         # 09:20 → 09:00 (장 개장 즉시)
     "min_sector_score": 0.1,        # 0.3 → 0.1 (사실상 모든 섹터 통과)
     "min_vol_ratio": 0.1,           # 2.0 → 0.1 (장중 누적 거래량 부정합 회피)
     "three_min_up_ratio": 0.3,      # 0.6 → 0.3 (1/3 우상향만 요구)
@@ -102,6 +102,99 @@ S5_PARAMS = {
     "weak_min_profit": 0.01,        # 0.03 → 0.01
     "position_ratio": 0.30,         # 0.15 → 0.30 (1회 비중 ↑)
 }
+
+# ─── 시간대별 신규 전략 (S6/S7/S8/S9) ────────────────────────────
+# 임계값은 백테스트 결과로 재조정 필요 (docs/backtest_results.md 참조)
+
+S6_PARAMS = {
+    "entry_start": "093000",        # 09:30 (시초 변동성 정리 후)
+    "entry_end": "110000",          # 11:00
+    "min_vol_ratio": 1.5,           # 거래량 1.5배 이상
+    "min_three_min_up_ratio": 0.5,
+    "stop_below_or_high_pct": 0.985,    # opening_range_high × 0.985 이탈 손절
+    "stop_loss": -0.02,             # -2% 하드
+    "trail_pullback": 0.02,         # high × 0.98 트레일
+    "take_profit_1": 0.015,         # +1.5% 50% 매도
+    "take_profit_2": 0.035,         # +3.5% 전량
+    "forced_close": "151500",       # 15:15 시장가 강제
+    "position_ratio": 0.20,
+}
+
+S7_PARAMS = {
+    "entry_start": "100000",        # 10:00
+    "entry_end": "140000",          # 14:00
+    "lunch_start": "113000",        # 점심 신규 진입 차단
+    "lunch_end":   "130000",
+    "uptrend_min_intraday": 0.01,   # today_high > today_open × 1.01
+    "pullback_min_pct": -0.04,      # 너무 깊은 하락은 추세 깨짐
+    "pullback_max_pct": -0.015,     # 너무 얕은 하락은 아직 눌림목 X
+    "min_three_min_up_ratio": 0.5,
+    "min_vol_ratio": 1.0,
+    "stop_from_high": -0.05,        # today_high × 0.95 이탈
+    "stop_loss": -0.02,
+    "take_profit_1": 0.01,          # +1% 50%
+    "take_profit_2": 0.025,         # +2.5% 전량
+    "time_stop_min": 90,            # 90분 보유 + 수익<0.3% → 청산
+    "weak_min_profit": 0.003,
+    "forced_close": "151500",
+    "position_ratio": 0.20,
+}
+
+S8_PARAMS = {
+    "entry_start": "130000",        # 13:00
+    "entry_end":   "143000",        # 14:30
+    "min_change_rate": 0.02,        # 당일 +2% 이상
+    "max_change_rate": 0.12,        # 너무 과열된 종목 회피
+    "min_three_min_up_ratio": 0.6,
+    "min_vol_ratio": 1.5,
+    "trail_pullback": 0.015,        # high × 0.985 트레일
+    "stop_loss": -0.015,
+    "take_profit": 0.02,            # +2% 전량
+    "forced_close": "145000",       # 14:50 강제 (S9 베팅 전 마감)
+    "position_ratio": 0.20,
+}
+
+S9_PARAMS = {
+    "entry_start": "143000",        # 14:30
+    "entry_end":   "151500",        # 15:15
+    "min_change_rate": 0.01,        # 당일 +1% 이상
+    "min_vol_ratio": 1.2,
+    "next_day_exit_time": "090100", # 익일 09:01 시장가 매도
+    "position_ratio": 0.10,         # 오버나이트 보수적
+}
+
+# ─── 우선순위 락 (한 종목당 1포지션 — Position 분리 트래킹은 별도 PR) ──
+STRATEGY_PRIORITY = {
+    "S6": 5,
+    "S7": 4,
+    "S8": 3,
+    "S1": 2,
+    "S9": 1,
+    "S5": 0,
+}
+
+# ─── 매매 빈도 제한 ──────────────────────────────────────────────
+REBUY_COOLDOWN_SEC = 1800           # 30분 종목별 재매수 쿨다운
+MAX_BUYS_PER_CODE_PER_DAY = 3
+MAX_TOTAL_BUYS_PER_DAY = 20
+
+# ─── 마감 안전망 ─────────────────────────────────────────────────
+CLOSEOUT_SWEEP_TIME = "152500"      # 15:25 잔여 단타 강제 시장가 청산
+LUNCH_QUIET_START = "113000"        # 점심시간 (S7 신규 진입 차단)
+LUNCH_QUIET_END   = "130000"
+
+# ─── S1 동적 워치리스트 (KIS volume-rank prdy_vrss_rate 기반) ────
+S1_DYNAMIC_REFRESH_SEC = 300        # 5분 갱신
+S1_DYNAMIC_PRDY_VRSS_RATE_MIN = 500.0  # 전일 거래량 대비 5배 이상
+S1_DYNAMIC_MIN_PRICE = 1000
+S1_DYNAMIC_MAX_PRICE = 500000
+S1_DYNAMIC_MIN_AVG_AMOUNT = 100_000_000  # 1억원
+S1_DYNAMIC_INITIAL_SLOTS = 5        # 초기 5종목, 운영 후 8까지 확장 가능
+S1_DYNAMIC_MAX_SLOTS = 8
+
+# ─── 강제청산 부분체결 재시도 ────────────────────────────────────
+FORCED_CLOSE_RETRY_MAX = 3
+FORCED_CLOSE_RETRY_DELAY_SEC = 5
 
 # ─── 섹터 키워드 (뉴스 매칭용) ───────────────────────────────────
 # v2 (2026-05): 일반 단어 제거, 종목명/구체 용어 위주로 강화
@@ -185,6 +278,7 @@ KIS_PATH_ORDER_CANCEL = "/uapi/domestic-stock/v1/trading/order-rvsecncl"
 KIS_PATH_BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
 KIS_PATH_FILLED = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
 KIS_PATH_UNFILLED = "/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl"
+KIS_PATH_VOLUME_RANK = "/uapi/domestic-stock/v1/quotations/volume-rank"
 
 # TR ID (실전/모의 구분)
 KIS_TR = {
@@ -199,6 +293,7 @@ KIS_TR = {
         "orderbook": "FHKST01010200",
         "daily_price": "FHKST03010100",
         "minute_price": "FHKST03010200",
+        "volume_rank": "FHPST01710000",
         "ws_real_price": "H0STCNT0",
         "ws_orderbook": "H0STASP0",
     },
@@ -213,6 +308,7 @@ KIS_TR = {
         "orderbook": "FHKST01010200",
         "daily_price": "FHKST03010100",
         "minute_price": "FHKST03010200",
+        "volume_rank": "FHPST01710000",
         "ws_real_price": "H0STCNT0",
         "ws_orderbook": "H0STASP0",
     },

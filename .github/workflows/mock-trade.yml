@@ -73,6 +73,7 @@ jobs:
           path: |
             data/sector_leaders_cache.json
             data/.kis_token_mock.json
+            data/day_start_eval.json
           key: auto-trade-data-${{ github.run_id }}
           restore-keys: |
             auto-trade-data-
@@ -101,6 +102,7 @@ jobs:
           path: |
             data/sector_leaders_cache.json
             data/.kis_token_mock.json
+            data/day_start_eval.json
           key: auto-trade-data-${{ github.run_id }}
 
       - name: Upload logs (always)

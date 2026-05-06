@@ -21,6 +21,7 @@ import threading
 import time
 from datetime import datetime
 
+from config.constants import S1_DYNAMIC_REFRESH_SEC
 from config.settings import settings
 from core.kis_api_client import KISApiClient
 from core.market_data_collector import MarketDataCollector
@@ -41,11 +42,11 @@ _PREMARKET_START_TIME = "0850"
 # S5 전략 평가 주기 (초). 매 N초마다 워치리스트 종목 평가
 _STRATEGY_TICK_SEC = 30
 
-# S5 진입 시작 시각 (모의 공격형: 09:20 → 09:10)
-_S5_ENTRY_TIME = "091000"
+# S5 진입 시작 시각 (모의 공격형: 정규장 개장 직후)
+_S5_ENTRY_TIME = "090000"
 
-# S1 진입 시작 시각 (모의 공격형: 09:15 → 09:05)
-_S1_ENTRY_TIME = "090500"
+# S1 진입 시작 시각 (모의 공격형: 정규장 개장 직후)
+_S1_ENTRY_TIME = "090000"
 
 
 class AutoTrader:
@@ -71,11 +72,31 @@ class AutoTrader:
         self._premarket_done_today: str = ""   # "YYYYMMDD" 저장
         self._rl = RLAgentWrapper(model_path=None)  # 재학습 후 경로 지정
 
-        # S5 일봉 지표 캐시 {code: {"ma5": float, "vol_ma20": float, "prev_close": int}}
+        # 일봉 지표 캐시 {code: {ma5, ma20, ma60, vol_ma20, prev_close, prev_day_high}}
         self._daily_indicators: dict[str, dict] = {}
         self._last_strategy_tick = 0.0  # time.monotonic() 마지막 평가 시각
         self._diag_tick_count = 0       # 진단 로그 주기 카운터 (10 tick = 5분)
         self._last_balance_sync = 0.0   # KIS 잔고 마지막 재동기화 시각
+        self._day_start_eval = 0.0      # 오늘 시작 평가금액 (오늘 수익률 기준)
+
+        # ─── 시간대별 전략용 상태 ────────────────────────────────────
+        # S1 동적 워치리스트 (KIS volume-rank 기반)
+        self._s1_watchlist: set[str] = set()
+        self._last_dyn_refresh = 0.0
+        # S6 opening_range_high (09:30 시점 today_high 스냅샷)
+        self._opening_range_high: dict[str, int] = {}
+        self._opening_range_snapped_today: str = ""
+
+        # 매매 빈도 제한
+        self._last_sell_at: dict[str, datetime] = {}
+        self._buy_count_today: dict[str, int] = {}
+        self._total_buy_count_today: int = 0
+        self._buy_limit_warned_today: str = ""
+        self._buy_count_date: str = ""
+
+        # 마감 sweep + S9 익일 청산
+        self._closeout_sweep_done_today: str = ""
+        self._s9_overnight_exit_done_today: str = ""
 
         # 페이퍼 트레이딩 또는 실거래 주문 매니저
         if settings.is_paper:
@@ -106,6 +127,16 @@ class AutoTrader:
         # 잔고 동기화
         if not settings.is_paper:
             self._sync_balance()
+
+        # 오늘 시작 평가금액 로드/저장 (today 수익률 기준점)
+        self._initialize_day_start()
+
+        # S1 동적 워치리스트 초기화 (api 준비 후)
+        from core.dynamic_watchlist import DynamicWatchlist
+        from config.constants import S1_DYNAMIC_INITIAL_SLOTS
+        self._dynamic_watchlist = DynamicWatchlist(
+            api=self._api, data=self._data, max_slots=S1_DYNAMIC_INITIAL_SLOTS,
+        )
 
         # 실시간 구독은 장전 준비(_run_premarket)에서 워치리스트만 체결가+호가
         # 동시 구독. 시작 시점엔 WS 미연결 상태로 둠 (KIS WebSocket 한도 절약).
@@ -166,13 +197,32 @@ class AutoTrader:
                     time.sleep(30)
                     continue
 
+                # 일일 매매 카운터 자정 리셋
+                if self._buy_count_date != today_str:
+                    self._buy_count_date = today_str
+                    self._buy_count_today.clear()
+                    self._total_buy_count_today = 0
+                    self._buy_limit_warned_today = ""
+
+                # S9 보유 종목 익일 시초가 청산 (09:00~09:01 사이 1회)
+                if (
+                    not settings.is_paper
+                    and self._order_mgr
+                    and self._s9_overnight_exit_done_today != today_str
+                    and "090000" <= time_str < "090200"
+                ):
+                    self._s9_overnight_exit_done_today = today_str
+                    threading.Thread(
+                        target=self._evaluate_s9_overnight_exit,
+                        daemon=True,
+                        name="s9-overnight-exit",
+                    ).start()
+
                 # 체결 동기화 (실거래)
                 if self._order_mgr:
                     self._order_mgr.sync_filled_orders()
 
                 # KIS 잔고 주기적 재동기화 (5분 간격)
-                # 체결 누락/모의 시스템 드리프트로 portfolio와 실 잔고가
-                # 어긋날 때 자동 복구. paper 모드는 KIS 잔고 없으므로 스킵.
                 if (
                     not settings.is_paper
                     and time.monotonic() - self._last_balance_sync >= 300
@@ -184,7 +234,27 @@ class AutoTrader:
                         name="balance-resync",
                     ).start()
 
-                # 전략 평가 (09:15 S1 / 09:20 S5, _STRATEGY_TICK_SEC 간격)
+                # S1 동적 워치리스트 갱신 (5분 간격, 09:00~14:30)
+                if (
+                    settings.STRATEGY_S1_ENABLED
+                    and "090000" <= time_str < "143000"
+                    and time.monotonic() - self._last_dyn_refresh >= S1_DYNAMIC_REFRESH_SEC
+                ):
+                    self._last_dyn_refresh = time.monotonic()
+                    threading.Thread(
+                        target=self._refresh_s1_watchlist,
+                        daemon=True,
+                        name="s1-dyn-watchlist",
+                    ).start()
+
+                # 09:30 시점 opening_range_high 스냅샷 (S6용)
+                if (
+                    "093000" <= time_str < "093100"
+                    and self._opening_range_snapped_today != today_str
+                ):
+                    self._snap_opening_range_high(today_str)
+
+                # 전략 평가 (시간대별 라우팅, _STRATEGY_TICK_SEC 간격)
                 if time_str >= _S1_ENTRY_TIME:
                     now_mono = time.monotonic()
                     if now_mono - self._last_strategy_tick >= _STRATEGY_TICK_SEC:
@@ -196,10 +266,43 @@ class AutoTrader:
                             and time_str >= _S5_ENTRY_TIME
                         ):
                             self._evaluate_s5_watchlist(time_str)
-                        # 5분마다 워치리스트 상태 한 줄 진단
+                        if (
+                            settings.STRATEGY_S6_ENABLED
+                            and "093000" <= time_str < "110000"
+                        ):
+                            self._evaluate_s6_watchlist(time_str)
+                        if (
+                            settings.STRATEGY_S7_ENABLED
+                            and "100000" <= time_str < "140000"
+                        ):
+                            self._evaluate_s7_watchlist(time_str)
+                        if (
+                            settings.STRATEGY_S8_ENABLED
+                            and "130000" <= time_str < "143000"
+                        ):
+                            self._evaluate_s8_watchlist(time_str)
+                        if (
+                            settings.STRATEGY_S9_ENABLED
+                            and "143000" <= time_str < "151500"
+                        ):
+                            self._evaluate_s9_watchlist(time_str, today_str)
+
+                        # 5분마다 진단 로그
                         self._diag_tick_count += 1
                         if self._diag_tick_count % 10 == 0:
                             self._log_eval_diagnostic(time_str)
+
+                # 마감 안전망 sweep (15:25~)
+                if (
+                    "152500" <= time_str < "152600"
+                    and self._closeout_sweep_done_today != today_str
+                ):
+                    self._closeout_sweep_done_today = today_str
+                    threading.Thread(
+                        target=self._closeout_sweep,
+                        daemon=True,
+                        name="closeout-sweep",
+                    ).start()
 
                 # 장 마감 전 일일 리포트 (15:30)
                 if "153000" <= time_str <= "153100":
@@ -363,16 +466,21 @@ class AutoTrader:
                 self._daily_indicators[code] = {
                     "ma5": float(last.get("ma5", 0) or 0),
                     "ma20": float(last.get("ma20", 0) or 0),
+                    "ma60": float(last.get("ma60", 0) or 0),
                     "vol_ma20": float(last.get("vol_ma20", 0) or 0),
                     "prev_close": int(last.get("close", 0) or 0),
+                    "prev_day_high": int(last.get("high", 0) or 0),
                 }
                 logger.info(
-                    "[main] %s 지표 로드: ma5=%.0f, ma20=%.0f, vol_ma20=%.0f, prev_close=%d",
+                    "[main] %s 지표 로드: ma5=%.0f, ma20=%.0f, ma60=%.0f, "
+                    "vol_ma20=%.0f, prev_close=%d, prev_high=%d",
                     code,
                     self._daily_indicators[code]["ma5"],
                     self._daily_indicators[code]["ma20"],
+                    self._daily_indicators[code]["ma60"],
                     self._daily_indicators[code]["vol_ma20"],
                     self._daily_indicators[code]["prev_close"],
+                    self._daily_indicators[code]["prev_day_high"],
                 )
             except Exception as exc:
                 logger.warning("[main] %s 지표 프리로드 실패: %s", code, exc)
@@ -428,9 +536,15 @@ class AutoTrader:
                 logger.error("[main] %s 전략 평가 오류: %s", code, exc, exc_info=True)
         logger.debug("[main] S5 평가 완료: %d종목", evaluated)
 
+    def _intraday_candidates(self) -> set[str]:
+        """S6/S7/S8 평가 후보: S1 동적 워치리스트 + S5 워치리스트 합집합."""
+        return set(self._s1_watchlist) | set(self._strategy.get_s5_watchlist())
+
     def _evaluate_s1_watchlist(self, time_str: str) -> None:
-        """S1 워치리스트 평가 (옵션A: S5 워치리스트 공유, 호가는 0=조건4 자동통과)."""
-        watchlist = self._strategy.get_s5_watchlist()  # 일단 S5와 공유
+        """S1 평가. S1 동적 워치리스트(KIS volume-rank 기반) 우선, 없으면 S5 폴백."""
+        # S1 동적 워치리스트가 있으면 그걸 사용, 없으면 S5 워치리스트 폴백
+        watchlist = list(self._s1_watchlist) if self._s1_watchlist else \
+                    self._strategy.get_s5_watchlist()
         if not watchlist:
             return
 
@@ -490,6 +604,239 @@ class AutoTrader:
             except Exception as exc:
                 logger.error("[main] %s S1 평가 오류: %s", code, exc, exc_info=True)
 
+    # ─── S6/S7/S8/S9 평가 ──────────────────────────────────────────
+
+    def _eval_state(self, code: str):
+        """공통 state 빌더 (pos, indicators, today_bar)."""
+        pos = self._portfolio.positions.get(code)
+        indicators = self._daily_indicators.get(code, {})
+        today_bar = self._data.get_today_ohlcv(code) or {}
+        return pos, indicators, today_bar
+
+    def _make_state(self, pos) -> dict:
+        return {
+            "position_qty": pos.quantity if pos else 0,
+            "avg_price": pos.avg_price if pos else 0.0,
+            "cash": self._portfolio.cash,
+        }
+
+    def _evaluate_s6_watchlist(self, time_str: str) -> None:
+        """S6 돌파매매 평가."""
+        for code in self._intraday_candidates():
+            try:
+                price = self._data.get_last_price(code)
+                if not price:
+                    continue
+                pos, indicators, _ = self._eval_state(code)
+                signal = self._strategy.evaluate_s6(
+                    code=code,
+                    name=pos.name if pos else code,
+                    current_price=price,
+                    prev_day_high=indicators.get("prev_day_high", 0),
+                    opening_range_high=self._opening_range_high.get(code, 0),
+                    ma20=indicators.get("ma20", 0),
+                    vol_ratio=self._compute_vol_ratio(code, indicators),
+                    three_min_up_ratio=self._compute_up_ratio(code, n=5),
+                    current_time=time_str,
+                    position_qty=pos.quantity if pos else 0,
+                    avg_entry_price=pos.avg_price if pos else 0.0,
+                )
+                if signal:
+                    self._handle_signal(signal, self._make_state(pos))
+            except Exception as exc:
+                logger.error("[main] %s S6 평가 오류: %s", code, exc, exc_info=True)
+
+    def _evaluate_s7_watchlist(self, time_str: str) -> None:
+        """S7 눌림목 평가."""
+        for code in self._intraday_candidates():
+            try:
+                price = self._data.get_last_price(code)
+                if not price:
+                    continue
+                pos, indicators, today_bar = self._eval_state(code)
+                signal = self._strategy.evaluate_s7(
+                    code=code,
+                    name=pos.name if pos else code,
+                    current_price=price,
+                    today_open=int(today_bar.get("open", price) or price),
+                    today_high=int(today_bar.get("high", price) or price),
+                    ma20=indicators.get("ma20", 0),
+                    ma60=indicators.get("ma60", 0),
+                    vol_ratio=self._compute_vol_ratio(code, indicators),
+                    three_min_up_ratio=self._compute_up_ratio(code, n=3),
+                    current_time=time_str,
+                    position_qty=pos.quantity if pos else 0,
+                    avg_entry_price=pos.avg_price if pos else 0.0,
+                    now_dt=datetime.now(),
+                )
+                if signal:
+                    self._handle_signal(signal, self._make_state(pos))
+            except Exception as exc:
+                logger.error("[main] %s S7 평가 오류: %s", code, exc, exc_info=True)
+
+    def _evaluate_s8_watchlist(self, time_str: str) -> None:
+        """S8 오후 추세 평가."""
+        for code in self._intraday_candidates():
+            try:
+                price = self._data.get_last_price(code)
+                if not price:
+                    continue
+                pos, indicators, _ = self._eval_state(code)
+                signal = self._strategy.evaluate_s8(
+                    code=code,
+                    name=pos.name if pos else code,
+                    current_price=price,
+                    prev_close=indicators.get("prev_close", 0),
+                    ma5=indicators.get("ma5", 0),
+                    vol_ratio=self._compute_vol_ratio(code, indicators),
+                    three_min_up_ratio=self._compute_up_ratio(code, n=5),
+                    current_time=time_str,
+                    position_qty=pos.quantity if pos else 0,
+                    avg_entry_price=pos.avg_price if pos else 0.0,
+                )
+                if signal:
+                    self._handle_signal(signal, self._make_state(pos))
+            except Exception as exc:
+                logger.error("[main] %s S8 평가 오류: %s", code, exc, exc_info=True)
+
+    def _evaluate_s9_watchlist(self, time_str: str, today_str: str) -> None:
+        """S9 종가베팅 평가 (진입만)."""
+        for code in self._intraday_candidates():
+            try:
+                price = self._data.get_last_price(code)
+                if not price:
+                    continue
+                pos, indicators, _ = self._eval_state(code)
+                signal = self._strategy.evaluate_s9(
+                    code=code,
+                    name=pos.name if pos else code,
+                    current_price=price,
+                    prev_close=indicators.get("prev_close", 0),
+                    ma20=indicators.get("ma20", 0),
+                    vol_ratio=self._compute_vol_ratio(code, indicators),
+                    current_time=time_str,
+                    position_qty=pos.quantity if pos else 0,
+                    today_str=today_str,
+                )
+                if signal:
+                    self._handle_signal(signal, self._make_state(pos))
+            except Exception as exc:
+                logger.error("[main] %s S9 평가 오류: %s", code, exc, exc_info=True)
+
+    def _evaluate_s9_overnight_exit(self) -> None:
+        """익일 09:00에 S9 strategy 마킹 보유분을 시장가 일괄 매도."""
+        if not self._order_mgr:
+            return
+        for code, pos in list(self._portfolio.positions.items()):
+            if pos.strategy != "S9" or pos.quantity <= 0:
+                continue
+            logger.info("[S9] 익일 시초가 청산: %s %d주", code, pos.quantity)
+            self._order_mgr.place_sell(
+                strategy="S9",
+                code=code,
+                name=pos.name,
+                quantity=pos.quantity,
+                price=0,
+                cancel_reason="S9 익일 시초가",
+                is_forced_close=True,
+            )
+            self._notifier.send(
+                f"매도 주문 | {pos.name}({code}) {pos.quantity}주 시장가 [S9] - 익일 청산",
+                level="TRADE",
+            )
+
+    def _closeout_sweep(self) -> None:
+        """15:25 단타 잔여 포지션 시장가 강제 청산 (안전망)."""
+        if not self._order_mgr:
+            return
+        intraday_strats = {"S1", "S6", "S7", "S8"}
+        for code, pos in list(self._portfolio.positions.items()):
+            if pos.strategy not in intraday_strats or pos.quantity <= 0:
+                continue
+            logger.warning(
+                "[main] 15:25 sweep: %s %s %d주 시장가 청산",
+                pos.strategy, code, pos.quantity,
+            )
+            self._order_mgr.place_sell(
+                strategy=pos.strategy,
+                code=code,
+                name=pos.name,
+                quantity=pos.quantity,
+                price=0,
+                cancel_reason=f"{pos.strategy} 마감 sweep",
+                is_forced_close=True,
+            )
+            self._notifier.send(
+                f"매도 주문 | {pos.name}({code}) {pos.quantity}주 시장가 [{pos.strategy}] - 마감 sweep",
+                level="TRADE",
+            )
+
+    # ─── S1 동적 워치리스트 + opening range ───────────────────────
+
+    def _refresh_s1_watchlist(self) -> None:
+        """5분마다 KIS volume-rank API 폴링 → S1 워치리스트 갱신."""
+        try:
+            selected = self._dynamic_watchlist.refresh()
+            new_codes = {s["code"] for s in selected}
+        except Exception as exc:
+            logger.warning("[main] 동적 워치리스트 갱신 오류: %s", exc)
+            return
+
+        added = new_codes - self._s1_watchlist
+        removed = self._s1_watchlist - new_codes
+
+        # 보유 중인 종목은 제거 보류 (청산 추적 위해)
+        held_codes = {
+            c for c, p in self._portfolio.positions.items() if p.quantity > 0
+        }
+        removed = removed - held_codes
+
+        self._s1_watchlist = (self._s1_watchlist | added) - removed
+
+        if added:
+            logger.info("[S1 동적] 신규 추가: %s", sorted(added))
+            self._preload_daily_indicators(list(added))
+            try:
+                self._api.subscribe_realtime(
+                    codes=list(added),
+                    on_price=self._on_realtime_price,
+                    on_orderbook=self._on_realtime_orderbook,
+                )
+            except Exception as exc:
+                logger.warning("[main] S1 동적 종목 구독 실패: %s", exc)
+        if removed:
+            logger.info("[S1 동적] 제거: %s", sorted(removed))
+
+    def _snap_opening_range_high(self, today_str: str) -> None:
+        """09:30 시점 today_high를 종목별로 스냅샷 (S6 돌파 기준선)."""
+        codes = self._intraday_candidates()
+        if not codes:
+            return
+        for code in codes:
+            today_bar = self._data.get_today_ohlcv(code) or {}
+            high = int(today_bar.get("high", 0) or 0)
+            if high > 0:
+                self._opening_range_high[code] = high
+        self._opening_range_snapped_today = today_str
+        logger.info(
+            "[main] opening_range_high 스냅샷 (%d종목): %s",
+            len(self._opening_range_high),
+            {k: f"{v:,}" for k, v in list(self._opening_range_high.items())[:5]},
+        )
+
+    def _compute_vol_ratio(self, code: str, indicators: dict) -> float:
+        """today_volume / vol_ma20 계산 (장중 누적, 시간 비례 보정 X)."""
+        today_bar = self._data.get_today_ohlcv(code) or {}
+        vol_ma20 = float(indicators.get("vol_ma20", 0) or 0)
+        today_volume = float(today_bar.get("volume", 0) or 0)
+        return today_volume / vol_ma20 if vol_ma20 > 0 else 0.0
+
+    def _compute_up_ratio(self, code: str, n: int = 5) -> float:
+        """최근 N개 3분봉 우상향 비율."""
+        from core.market_data_collector import MarketDataCollector
+        bars = self._data.get_three_min_bars(code, n=n)
+        return MarketDataCollector.calc_three_min_up_ratio(bars)
+
     def _log_eval_diagnostic(self, time_str: str) -> None:
         """5분마다 워치리스트 종목 상태를 INFO 로그로 출력 (진입 차단 원인 추적용)."""
         watchlist = self._strategy.get_s5_watchlist()
@@ -520,26 +867,107 @@ class AutoTrader:
                 ma5, ma5_status, vol_ratio, change,
             )
 
+    # ─── 전략별 position_ratio 룩업 ─────────────────────────────────
+    @staticmethod
+    def _strategy_position_ratio(strategy: str) -> float:
+        """전략별 1회 매수 비중 (가용 현금 대비)."""
+        from config.constants import (
+            S1_PARAMS, S5_PARAMS, S6_PARAMS, S7_PARAMS, S8_PARAMS, S9_PARAMS,
+        )
+        params_map = {
+            "S1": S1_PARAMS, "S5": S5_PARAMS, "S6": S6_PARAMS,
+            "S7": S7_PARAMS, "S8": S8_PARAMS, "S9": S9_PARAMS,
+        }
+        p = params_map.get(strategy, {})
+        return float(p.get("position_ratio", 0.20))
+
     def _handle_signal(self, signal, state: dict) -> None:
         """전략 시그널 → 주문 발주 (paper / live mock).
-        매수 시 _portfolio.cash 기준으로 같은 tick 내 누적 발주를 방지."""
-        from config.constants import S5_PARAMS
+
+        매수 가드 5중:
+          1. 우선순위 락 (다른 전략이 같은 종목 보유 중이면 스킵)
+          2. 30분 재매수 쿨다운
+          3. 종목당 일일 매수 한도 (3회)
+          4. 일일 전체 매수 한도 (20회)
+          5. 가용 현금 + 1% 버퍼 체크
+        매수 시 _portfolio.cash 즉시 차감(낙관적 reservation).
+        """
+        from config.constants import (
+            MAX_BUYS_PER_CODE_PER_DAY,
+            MAX_TOTAL_BUYS_PER_DAY,
+            REBUY_COOLDOWN_SEC,
+            STRATEGY_PRIORITY,
+        )
         from strategies.base_strategy import Signal as SignalEnum
 
         if signal.signal == SignalEnum.BUY:
-            available = self._portfolio.cash  # 실시간 가용 현금
-            # 1회 비중 vs 실가용 중 작은 쪽 사용
-            budget = min(state["cash"] * S5_PARAMS["position_ratio"], available)
+            # ── 1. 우선순위 락 ────────────────────────────────────────
+            existing = self._portfolio.positions.get(signal.code)
+            if existing is not None and existing.quantity > 0:
+                cur_pri = STRATEGY_PRIORITY.get(signal.strategy, 0)
+                ex_pri = STRATEGY_PRIORITY.get(existing.strategy, 0)
+                # 같은 전략이면 정상 (보유 중인 동일 코드 추가 매수는 일반적 X — 전략 evaluate 단계에서 차단)
+                if existing.strategy != signal.strategy and cur_pri <= ex_pri:
+                    logger.info(
+                        "[main] %s %s 보유중 → %s 매수 스킵 (분리 트래킹 미구현 한계)",
+                        signal.code, existing.strategy, signal.strategy,
+                    )
+                    return
+
+            # ── 2. 재매수 쿨다운 ─────────────────────────────────────
+            last_sell = self._last_sell_at.get(signal.code)
+            if last_sell is not None:
+                elapsed = (datetime.now() - last_sell).total_seconds()
+                if elapsed < REBUY_COOLDOWN_SEC:
+                    logger.info(
+                        "[main] %s 매도 후 %.0fs 미경과 (쿨다운 %ds) → %s 매수 스킵",
+                        signal.code, elapsed, REBUY_COOLDOWN_SEC, signal.strategy,
+                    )
+                    return
+
+            # ── 3. 종목당 일일 매수 한도 ─────────────────────────────
+            cnt_for_code = self._buy_count_today.get(signal.code, 0)
+            if cnt_for_code >= MAX_BUYS_PER_CODE_PER_DAY:
+                logger.info(
+                    "[main] %s 일일 종목 매수 한도(%d/%d) 도달 → %s 매수 스킵",
+                    signal.code, cnt_for_code, MAX_BUYS_PER_CODE_PER_DAY,
+                    signal.strategy,
+                )
+                return
+
+            # ── 4. 일일 전체 매수 한도 ───────────────────────────────
+            if self._total_buy_count_today >= MAX_TOTAL_BUYS_PER_DAY:
+                today_str = datetime.now().strftime("%Y%m%d")
+                if self._buy_limit_warned_today != today_str:
+                    self._buy_limit_warned_today = today_str
+                    self._notifier.send(
+                        f"⚠️ 일일 매수 한도 도달 ({MAX_TOTAL_BUYS_PER_DAY}회) - 추가 매수 스킵",
+                        level="WARN",
+                    )
+                logger.info(
+                    "[main] 일일 전체 매수 한도(%d) 도달 → %s 매수 스킵",
+                    MAX_TOTAL_BUYS_PER_DAY, signal.strategy,
+                )
+                return
+
+            # ── 5. 가용 현금 검증 + 비중 계산 ────────────────────────
+            available = self._portfolio.cash
+            ratio = self._strategy_position_ratio(signal.strategy)
+            budget = min(state["cash"] * ratio, available)
             qty = int(budget // signal.price)
             required = qty * signal.price * 1.01  # 1% 수수료/슬리피지 버퍼
             if qty <= 0 or required > available:
                 logger.warning(
-                    "[main] %s 매수 스킵 (가용=%d, 필요=%d)",
+                    "[main] %s 매수 스킵 (가용=%d, 필요=%d, 전략=%s 비중=%.2f)",
                     signal.code, int(available), int(required),
+                    signal.strategy, ratio,
                 )
                 return
-            # 즉시 가용현금 차감 (낙관적 reservation - 실패시 sync_balance가 복원)
+
+            # 가용현금 즉시 차감 + 매수 카운터 증가
             self._portfolio._cash -= required
+            self._buy_count_today[signal.code] = cnt_for_code + 1
+            self._total_buy_count_today += 1
         else:
             # 매도: 시그널의 quantity 우선, 없으면 보유 × sell_ratio
             qty = signal.quantity or int(
@@ -547,6 +975,8 @@ class AutoTrader:
             )
             if qty <= 0:
                 return
+            # 매도 시각 기록 (재매수 쿨다운용)
+            self._last_sell_at[signal.code] = datetime.now()
 
         side_str = "매수" if signal.signal == SignalEnum.BUY else "매도"
 
@@ -568,12 +998,15 @@ class AutoTrader:
                     price=signal.price,
                 )
             else:
+                # 강제청산 시그널은 시장가로 발주 (reason 기반 판정)
+                forced = "마감" in (signal.reason or "") or "시장가" in (signal.reason or "")
                 order = self._order_mgr.place_sell(
                     strategy=signal.strategy,
                     code=signal.code,
                     name=signal.name,
                     quantity=qty,
                     price=signal.price,
+                    is_forced_close=forced,
                 )
             # 발주 성공 시 즉시 슬랙 (체결 콜백 notify_trade는 별도로 발송)
             if order is not None:
@@ -602,8 +1035,104 @@ class AutoTrader:
             return self._strategy.sector_manager.get_watchlist()
         return []
 
+    def _initialize_day_start(self) -> None:
+        """오늘 시작 평가금액 로드 또는 신규 저장.
+        14:25 핸드오프 잡에서도 같은 날짜면 같은 기준값 유지."""
+        import json as _json
+        today_str = datetime.now().strftime("%Y%m%d")
+        cache_path = settings.DATA_DIR / "day_start_eval.json"
+        try:
+            if cache_path.exists():
+                data = _json.loads(cache_path.read_text(encoding="utf-8"))
+                if data.get("date") == today_str:
+                    self._day_start_eval = float(data["eval"])
+                    logger.info(
+                        "[main] 오늘 시작 평가금액 로드: %.0f원",
+                        self._day_start_eval,
+                    )
+                    return
+        except Exception as exc:
+            logger.warning(f"[main] day_start 로드 실패: {exc}")
+
+        # 신규 저장 (날짜 바뀜 또는 첫 실행)
+        self._day_start_eval = float(self._portfolio.total_eval)
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                _json.dumps({"date": today_str, "eval": self._day_start_eval}),
+                encoding="utf-8",
+            )
+            logger.info(
+                "[main] 오늘 시작 평가금액 저장: %.0f원",
+                self._day_start_eval,
+            )
+        except Exception as exc:
+            logger.warning(f"[main] day_start 저장 실패: {exc}")
+
     def _send_daily_report(self) -> None:
         summary = self._portfolio.get_summary()
+
+        # 오늘 수익률 (시작 평가금액 대비)
+        if self._day_start_eval > 0:
+            today_pnl = summary["total_eval"] - self._day_start_eval
+            summary["today_pnl"] = today_pnl
+            summary["today_return_rate"] = today_pnl / self._day_start_eval
+            summary["day_start_eval"] = self._day_start_eval
+        else:
+            summary["today_pnl"] = 0.0
+            summary["today_return_rate"] = 0.0
+            summary["day_start_eval"] = 0.0
+
+        # 보유 포지션 상세 (현재 KIS 잔고 = portfolio 동기화 상태)
+        summary["positions_detail"] = [
+            {
+                "code": p.code,
+                "name": p.name,
+                "quantity": p.quantity,
+                "avg_price": p.avg_price,
+                "current_price": p.current_price,
+                "pnl_rate": (
+                    (p.current_price - p.avg_price) / p.avg_price
+                    if p.avg_price > 0 else 0.0
+                ),
+            }
+            for p in self._portfolio.positions.values()
+        ]
+
+        # 오늘 체결 이력 — KIS 서버에서 직접 조회 (재시작에도 무관)
+        # paper 모드는 _paper.get_filled_orders() 사용
+        today_fills = []
+        if self._order_mgr:  # live mock
+            try:
+                fills = self._api.get_filled_orders()
+                today_fills = [
+                    {
+                        "time": f.filled_at.strftime("%H:%M"),
+                        "code": f.code,
+                        "name": f.name,
+                        "side": f.side,
+                        "qty": f.filled_qty,
+                        "price": f.avg_filled_price,
+                    }
+                    for f in fills
+                ]
+            except Exception as exc:
+                logger.warning("오늘 체결 조회 실패: %s", exc)
+        elif self._paper:
+            today_fills = [
+                {
+                    "time": o.filled_at.strftime("%H:%M") if o.filled_at else "",
+                    "code": o.code,
+                    "name": o.name,
+                    "side": o.side,
+                    "qty": o.quantity,
+                    "price": o.filled_price,
+                }
+                for o in self._paper.get_filled_orders()
+                if o.filled
+            ]
+        summary["today_fills"] = today_fills
+
         self._notifier.send_daily_report(summary)
 
     def _shutdown(self, signum, frame) -> None:

@@ -23,6 +23,10 @@ from strategies.s2_gap_news import S2GapNews
 from strategies.s3_swing_momentum import S3SwingMomentum
 from strategies.s4_volatility_filter import S4VolatilityFilter
 from strategies.s5_sector_momentum import S5SectorMomentum
+from strategies.s6_breakout import S6Breakout
+from strategies.s7_pullback import S7Pullback
+from strategies.s8_afternoon_trend import S8AfternoonTrend
+from strategies.s9_close_bet import S9CloseBet
 from strategies.base_strategy import StrategySignal
 
 if TYPE_CHECKING:
@@ -49,19 +53,31 @@ class StrategyEngine:
         self._s3 = S3SwingMomentum()
         self._s4 = S4VolatilityFilter()
         self._s5 = S5SectorMomentum(data_collector=data_collector)
+        self._s6 = S6Breakout()
+        self._s7 = S7Pullback()
+        self._s8 = S8AfternoonTrend()
+        self._s9 = S9CloseBet()
 
         # S5 뉴스/섹터 컴포넌트
         self._news = NewsCollector()
         self._sector = SectorManager(api_client=api_client)
 
-        # S5 enabled 설정 반영
+        # 전략별 enabled 설정 반영
         if not settings.STRATEGY_S5_ENABLED:
             self._s5.disable()
+        if not settings.STRATEGY_S6_ENABLED:
+            self._s6.disable()
+        if not settings.STRATEGY_S7_ENABLED:
+            self._s7.disable()
+        if not settings.STRATEGY_S8_ENABLED:
+            self._s8.disable()
+        if not settings.STRATEGY_S9_ENABLED:
+            self._s9.disable()
 
         # 장전 준비 완료 플래그
         self._premarket_ready = threading.Event()
 
-        logger.info("StrategyEngine 초기화 (S5 포함)")
+        logger.info("StrategyEngine 초기화 (S1~S9)")
 
     def update_market_filter(
         self,
@@ -281,6 +297,19 @@ class StrategyEngine:
         """S5 워치리스트 반환 (WebSocket 구독용)."""
         return self._s5.get_watchlist()
 
+    # ─── S6/S7/S8/S9 thin wrappers ───────────────────────────────
+    def evaluate_s6(self, **kwargs) -> Optional[StrategySignal]:
+        return self._s6.evaluate(**kwargs)
+
+    def evaluate_s7(self, **kwargs) -> Optional[StrategySignal]:
+        return self._s7.evaluate(**kwargs)
+
+    def evaluate_s8(self, **kwargs) -> Optional[StrategySignal]:
+        return self._s8.evaluate(**kwargs)
+
+    def evaluate_s9(self, **kwargs) -> Optional[StrategySignal]:
+        return self._s9.evaluate(**kwargs)
+
     @property
     def s4_risk_level(self) -> str:
         return self._s4.current_risk_level
@@ -300,6 +329,22 @@ class StrategyEngine:
     @property
     def s5(self) -> S5SectorMomentum:
         return self._s5
+
+    @property
+    def s6(self) -> S6Breakout:
+        return self._s6
+
+    @property
+    def s7(self) -> S7Pullback:
+        return self._s7
+
+    @property
+    def s8(self) -> S8AfternoonTrend:
+        return self._s8
+
+    @property
+    def s9(self) -> S9CloseBet:
+        return self._s9
 
     @property
     def sector_manager(self) -> SectorManager:

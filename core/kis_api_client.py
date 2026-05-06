@@ -39,6 +39,7 @@ from config.constants import (
     KIS_PATH_PRICE,
     KIS_PATH_TOKEN,
     KIS_PATH_UNFILLED,
+    KIS_PATH_VOLUME_RANK,
     KIS_RATE_LIMIT_PENALTY_MAX,
     KIS_RATE_LIMIT_PENALTY_SEC,
     KIS_RATE_LIMIT_QPS_MOCK,
@@ -698,15 +699,21 @@ class KISApiClient:
         qty: int,
         price: int = 0,
         order_type: str = "00",
+        is_forced_close: bool = False,
     ) -> OrderResult:
         """
         매도 주문
         order_type: 00=지정가, 01=시장가
+        is_forced_close: True면 시장가 강제 (price 무시, order_type 무시)
+            forced_close 시그널은 호가 멀어진 상황도 즉시 청산해야 함.
         """
         if not self.is_api_healthy():
             return OrderResult(success=False, message="API 오류 상태 - 주문 불가")
 
-        if price == 0:
+        if is_forced_close:
+            order_type = "01"  # 시장가
+            price = 0
+        elif price == 0:
             order_type = "01"
 
         body = {
@@ -720,11 +727,69 @@ class KISApiClient:
         try:
             data = self._post(KIS_PATH_ORDER_SELL, self._tr["sell"], body)
             order_no = data.get("output", {}).get("ODNO", "")
-            logger.info(f"매도 주문 완료 | {code} {qty}주 {price}원 | 주문번호={order_no}")
+            tag = " (시장가 강제)" if is_forced_close else ""
+            logger.info(
+                f"매도 주문 완료{tag} | {code} {qty}주 {price}원 | 주문번호={order_no}"
+            )
             return OrderResult(success=True, order_no=order_no, raw=data)
         except Exception as exc:
             logger.error(f"매도 주문 실패 | {code}: {exc}")
             return OrderResult(success=False, message=str(exc))
+
+    def get_volume_rank(
+        self,
+        market: str = MARKET_KOSPI,
+        rank_sort_class: str = "0",  # 0=전체, 1=관리종목제외 등
+        top_n: int = 30,
+    ) -> list[dict]:
+        """
+        거래대금/거래량 급증 종목 조회 (KIS volume-rank API).
+
+        Returns:
+            list of dict: [{"code", "name", "price", "prdy_vrss_rate",
+                            "acml_tr_pbmn", "upbnd_yn", "lwbnd_yn"}, ...]
+            prdy_vrss_rate: 전일 대비 거래량 비율 (%)
+            acml_tr_pbmn: 누적 거래대금
+        """
+        params = {
+            "FID_COND_MRKT_DIV_CODE": market,
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000",  # 0000=전체
+            "FID_DIV_CLS_CODE": rank_sort_class,
+            "FID_BLNG_CLS_CODE": "1",  # 1=거래대금 상위
+            "FID_TRGT_CLS_CODE": "111111111",
+            "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+            "FID_INPUT_PRICE_1": "0",
+            "FID_INPUT_PRICE_2": "0",
+            "FID_VOL_CNT": "0",
+            "FID_INPUT_DATE_1": "",
+        }
+        try:
+            data = self._get(
+                KIS_PATH_VOLUME_RANK,
+                self._tr["volume_rank"],
+                params,
+            )
+        except Exception as exc:
+            logger.warning(f"volume-rank 조회 실패: {exc}")
+            return []
+
+        rows = data.get("output", []) or []
+        result = []
+        for r in rows[:top_n]:
+            try:
+                result.append({
+                    "code": r.get("mksc_shrn_iscd", "").strip(),
+                    "name": r.get("hts_kor_isnm", "").strip(),
+                    "price": int(r.get("stck_prpr", 0) or 0),
+                    "prdy_vrss_rate": float(r.get("vol_inrt", 0) or 0),
+                    "acml_tr_pbmn": int(r.get("acml_tr_pbmn", 0) or 0),
+                    "upbnd_yn": r.get("uplmt_sign", "") in ("1", "Y"),
+                    "lwbnd_yn": r.get("lslmt_sign", "") in ("1", "Y"),
+                })
+            except (ValueError, TypeError):
+                continue
+        return result
 
     def cancel_order(
         self,
