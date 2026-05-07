@@ -57,11 +57,12 @@ REBALANCE_LOOKBACK_TRADES = 20      # 최근 N 트레이드 기준
 
 # ─── 전략별 파라미터 ──────────────────────────────────────────────
 S1_PARAMS = {
-    "entry_after": "090000",        # 09:15 → 09:00 (장 개장 즉시)
-    "profit_target_1": 0.015,       # 0.5% → 1.5% (노이즈 면역, 매매 효율↑)
-    "profit_target_2": 0.030,       # 1.2% → 3.0% (큰 추세 잡기)
+    "entry_after":  "091500",       # 09:15 이후 진입 (장 초기 변동 회피)
+    "entry_before": "092500",       # 09:25 이전까지만 (시초가 단타 윈도우)
+    "profit_target_1": 0.015,       # +1.5% 50% 익절 (R:R 1.0)
+    "profit_target_2": 0.030,       # +3.0% 전량 익절 (R:R 2.0, 큰 추세)
     "stop_loss_low": True,
-    "stop_loss_rate": -0.015,       # -2.5% → -1.5% (손실 빠른 컷)
+    "stop_loss_rate": -0.015,       # -1.5% 빠른 컷
     "intraday_close": True,
 }
 
