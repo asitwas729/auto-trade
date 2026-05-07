@@ -57,12 +57,12 @@ REBALANCE_LOOKBACK_TRADES = 20      # 최근 N 트레이드 기준
 
 # ─── 전략별 파라미터 ──────────────────────────────────────────────
 S1_PARAMS = {
-    "entry_after":  "091500",       # 09:15 이후 진입 (장 개장 초기 변동 회피)
-    "entry_before": "092500",       # 09:25 이전까지만 진입 (장 초반 변동성 구간)
-    "profit_target_1": 0.01,        # +1% → 50% 익절
-    "profit_target_2": 0.02,        # +2% → 전량 익절
+    "entry_after":  "091500",       # 09:15 이후 진입 (장 초기 변동 회피)
+    "entry_before": "092500",       # 09:25 이전까지만 (시초가 단타 윈도우)
+    "profit_target_1": 0.015,       # +1.5% 50% 익절 (R:R 1.0)
+    "profit_target_2": 0.030,       # +3.0% 전량 익절 (R:R 2.0, 큰 추세)
     "stop_loss_low": True,
-    "stop_loss_rate": -0.015,       # -1.5% 손절
+    "stop_loss_rate": -0.015,       # -1.5% 빠른 컷
     "intraday_close": True,
 }
 
@@ -176,8 +176,15 @@ STRATEGY_PRIORITY = {
 
 # ─── 매매 빈도 제한 ──────────────────────────────────────────────
 REBUY_COOLDOWN_SEC = 1800           # 30분 종목별 재매수 쿨다운
-MAX_BUYS_PER_CODE_PER_DAY = 3
+MAX_BUYS_PER_CODE_PER_DAY = 3       # 단타 전략(S1/S6/S7/S8) 종목당 일일 매수 한도
 MAX_TOTAL_BUYS_PER_DAY = 20
+
+# 전략별 종목당 일일 매수 한도 (없으면 MAX_BUYS_PER_CODE_PER_DAY 사용).
+# S5는 멀티데이 보유 전략이라 같은 종목 반복 진입 차단.
+MAX_BUYS_PER_CODE_PER_STRATEGY = {
+    "S5": 1,    # 종목당 1회/일 (반복 매매 방지)
+    "S9": 1,    # 종가베팅도 1회/일
+}
 
 # ─── 마감 안전망 ─────────────────────────────────────────────────
 CLOSEOUT_SWEEP_TIME = "152500"      # 15:25 잔여 단타 강제 시장가 청산
@@ -190,8 +197,8 @@ LUNCH_QUIET_END   = "130000"
 INTRADAY_DYNAMIC_REFRESH_SEC = 300        # 5분 갱신
 INTRADAY_DYNAMIC_INITIAL_SLOTS = 20       # 거래대금 상위 20종목
 INTRADAY_DYNAMIC_MAX_SLOTS = 20
-INTRADAY_DYNAMIC_MIN_PRICE = 1000
-INTRADAY_DYNAMIC_MAX_PRICE = 500000
+INTRADAY_DYNAMIC_MIN_PRICE = 50000   # 5만원 이상 (1주 단위 분할 효과↑, 동전주 회피)
+INTRADAY_DYNAMIC_MAX_PRICE = 300000  # 30만원 이하 (1억 종목 1주 단위 회피)
 INTRADAY_DYNAMIC_MIN_AVG_AMOUNT = 100_000_000  # 1억원
 
 # 하위호환 alias (기존 import 깨지지 않도록)
