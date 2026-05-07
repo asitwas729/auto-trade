@@ -97,12 +97,13 @@ jobs:
         run: python main.py
 
       - name: Fetch backtest minute data (after market close)
-        # main.py가 15:35에 정상 종료 후 실행. 10종목 × 13페이지 = ~3분.
+        # main.py가 15:35에 정상 종료 후 실행.
+        # 고정 20종목 + 동적 top 5 = 25종목 × 14 calls × 1.2s ≈ 7분.
         # 1차 잡(08:30~14:30 6h timeout)에서는 main.py가 timeout으로 끊겨서
         # 이 step도 건너뛸 수 있고, 2차 잡(14:25~)에서는 정상 종료 후 실행됨.
         if: steps.gate.outcome == 'success'
         continue-on-error: true
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: python scripts/fetch_daily_backtest_data.py
 
       - name: Save data cache (always)
