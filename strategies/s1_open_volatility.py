@@ -1,10 +1,10 @@
 """
 S1. 장초 변동성 단타
-- 09:15 이후 진입
+- 09:15~09:25 진입 (시초 5분 노이즈 회피 + 25분 이후 신규 차단)
 - 당일 저점 형성 후 반등 + 거래량 증가 + 단기MA 회복 + 호가 매수세
-- +1% 50% 매도, +2% 전량 매도
+- +1.5% 50% 매도, +3.0% 전량 매도
 - 당일 저가 이탈 또는 -1.5% 손절
-- 당일 청산 원칙
+- 09:30 강제청산 (시초 변동성 끝나는 시점)
 """
 
 from __future__ import annotations
@@ -52,23 +52,22 @@ class S1OpenVolatility(BaseStrategy):
         if not self.enabled:
             return None
 
-        # 진입 가능 시간 (09:15 ~ 09:25)
-        if current_time < self._p["entry_after"]:
-            return None
-        if position_qty == 0 and current_time >= self._p["entry_before"]:
-            return None
-
-        # 포지션 청산 시 상태 초기화
-        if position_qty == 0:
-            self._entry_lows.pop(code, None)
-            self._partial_sold.discard(code)
-
-        # ── 보유 중이면 EXIT 시그널 검사 ─────────────────────────────
+        # ── 보유 중이면 EXIT 시그널 검사 (09:25 이후, 09:30 강제청산도 여기서 처리) ──
         if position_qty > 0 and avg_entry_price > 0:
             return self._check_exit(
                 code, name, current_price, low_price,
                 avg_entry_price, position_qty, current_time
             )
+
+        # 포지션이 비어 있으면 상태 초기화
+        self._entry_lows.pop(code, None)
+        self._partial_sold.discard(code)
+
+        # ── 진입 윈도우: 09:15 이후 ~ 09:25 이전만 신규 진입 ─────────
+        if current_time < self._p["entry_after"]:
+            return None
+        if current_time >= self._p["entry_before"]:
+            return None
 
         # ── 진입 조건 검사 ────────────────────────────────────────────
         return self._check_entry(
@@ -129,7 +128,16 @@ class S1OpenVolatility(BaseStrategy):
     ) -> Optional[StrategySignal]:
         pnl_rate = (price - avg_price) / avg_price
 
-        # 장 마감 전 강제 청산 (15:20 이후)
+        # 09:30 강제청산 (시초 변동성 끝나는 시점)
+        if current_time >= self._p["forced_close"]:
+            logger.info(f"[S1] {name}({code}) 09:30 강제청산 ({pnl_rate:.2%})")
+            return StrategySignal(
+                signal=Signal.SELL, code=code, name=name, price=price,
+                quantity=qty, reason=f"09:30 강제청산({pnl_rate:.2%})",
+                strategy="S1", sell_ratio=1.0
+            )
+
+        # 장 마감 전 강제 청산 (15:20 이후, 안전망)
         if current_time >= "152000":
             logger.info(f"[S1] {name}({code}) 장 마감 전 전량 청산")
             return StrategySignal(
