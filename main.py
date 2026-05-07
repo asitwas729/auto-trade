@@ -21,7 +21,7 @@ import threading
 import time
 from datetime import datetime
 
-from config.constants import S1_DYNAMIC_REFRESH_SEC
+from config.constants import INTRADAY_DYNAMIC_REFRESH_SEC
 from config.settings import settings
 from core.kis_api_client import KISApiClient
 from core.market_data_collector import MarketDataCollector
@@ -80,8 +80,9 @@ class AutoTrader:
         self._day_start_eval = 0.0      # 오늘 시작 평가금액 (오늘 수익률 기준)
 
         # ─── 시간대별 전략용 상태 ────────────────────────────────────
-        # S1 동적 워치리스트 (KIS volume-rank 기반)
-        self._s1_watchlist: set[str] = set()
+        # 단타 동적 워치리스트 (거래대금 상위 20). S1/S6/S7/S8 공유.
+        # S5(섹터 멀티데이)는 별도 워치리스트 유지.
+        self._intraday_watchlist: set[str] = set()
         self._last_dyn_refresh = 0.0
         # S6 opening_range_high (09:30 시점 today_high 스냅샷)
         self._opening_range_high: dict[str, int] = {}
@@ -133,11 +134,11 @@ class AutoTrader:
         # 오늘 시작 평가금액 로드/저장 (today 수익률 기준점)
         self._initialize_day_start()
 
-        # S1 동적 워치리스트 초기화 (api 준비 후)
+        # 단타 동적 워치리스트 초기화 (api 준비 후)
         from core.dynamic_watchlist import DynamicWatchlist
-        from config.constants import S1_DYNAMIC_INITIAL_SLOTS
+        from config.constants import INTRADAY_DYNAMIC_INITIAL_SLOTS
         self._dynamic_watchlist = DynamicWatchlist(
-            api=self._api, data=self._data, max_slots=S1_DYNAMIC_INITIAL_SLOTS,
+            api=self._api, data=self._data, max_slots=INTRADAY_DYNAMIC_INITIAL_SLOTS,
         )
 
         # 실시간 구독은 장전 준비(_run_premarket)에서 워치리스트만 체결가+호가
@@ -246,17 +247,17 @@ class AutoTrader:
                         name="balance-resync",
                     ).start()
 
-                # S1 동적 워치리스트 갱신 (5분 간격, 09:00~14:30)
+                # 단타 동적 워치리스트 갱신 (5분 간격, 09:00~14:30)
+                # S1/S6/S7/S8 공유 — 거래대금 상위 20종목
                 if (
-                    settings.STRATEGY_S1_ENABLED
-                    and "090000" <= time_str < "143000"
-                    and time.monotonic() - self._last_dyn_refresh >= S1_DYNAMIC_REFRESH_SEC
+                    "090000" <= time_str < "143000"
+                    and time.monotonic() - self._last_dyn_refresh >= INTRADAY_DYNAMIC_REFRESH_SEC
                 ):
                     self._last_dyn_refresh = time.monotonic()
                     threading.Thread(
-                        target=self._refresh_s1_watchlist,
+                        target=self._refresh_intraday_watchlist,
                         daemon=True,
-                        name="s1-dyn-watchlist",
+                        name="intraday-dyn-watchlist",
                     ).start()
 
                 # 09:30 시점 opening_range_high 스냅샷 (S6용)
@@ -553,14 +554,12 @@ class AutoTrader:
         logger.debug("[main] S5 평가 완료: %d종목", evaluated)
 
     def _intraday_candidates(self) -> set[str]:
-        """S6/S7/S8 평가 후보: S1 동적 워치리스트 + S5 워치리스트 합집합."""
-        return set(self._s1_watchlist) | set(self._strategy.get_s5_watchlist())
+        """S1/S6/S7/S8 평가 후보: 거래대금 상위 20 단타 워치리스트."""
+        return set(self._intraday_watchlist)
 
     def _evaluate_s1_watchlist(self, time_str: str) -> None:
-        """S1 평가. S1 동적 워치리스트(KIS volume-rank 기반) 우선, 없으면 S5 폴백."""
-        # S1 동적 워치리스트가 있으면 그걸 사용, 없으면 S5 워치리스트 폴백
-        watchlist = list(self._s1_watchlist) if self._s1_watchlist else \
-                    self._strategy.get_s5_watchlist()
+        """S1 평가. 단타 동적 워치리스트(거래대금 상위 20)."""
+        watchlist = list(self._intraday_watchlist)
         if not watchlist:
             return
 
@@ -787,10 +786,11 @@ class AutoTrader:
                 level="TRADE",
             )
 
-    # ─── S1 동적 워치리스트 + opening range ───────────────────────
+    # ─── 단타 동적 워치리스트 + opening range ────────────────────
 
-    def _refresh_s1_watchlist(self) -> None:
-        """5분마다 KIS volume-rank API 폴링 → S1 워치리스트 갱신."""
+    def _refresh_intraday_watchlist(self) -> None:
+        """5분마다 KIS volume-rank API 폴링 → 거래대금 상위 20종목 워치리스트 갱신.
+        S1/S6/S7/S8 모두 이 워치리스트를 공유."""
         try:
             selected = self._dynamic_watchlist.refresh()
             new_codes = {s["code"] for s in selected}
@@ -798,8 +798,8 @@ class AutoTrader:
             logger.warning("[main] 동적 워치리스트 갱신 오류: %s", exc)
             return
 
-        added = new_codes - self._s1_watchlist
-        removed = self._s1_watchlist - new_codes
+        added = new_codes - self._intraday_watchlist
+        removed = self._intraday_watchlist - new_codes
 
         # 보유 중인 종목은 제거 보류 (청산 추적 위해)
         held_codes = {
@@ -807,10 +807,10 @@ class AutoTrader:
         }
         removed = removed - held_codes
 
-        self._s1_watchlist = (self._s1_watchlist | added) - removed
+        self._intraday_watchlist = (self._intraday_watchlist | added) - removed
 
         if added:
-            logger.info("[S1 동적] 신규 추가: %s", sorted(added))
+            logger.info("[단타 동적] 신규 추가 %d종목: %s", len(added), sorted(added))
             self._preload_daily_indicators(list(added))
             try:
                 self._api.subscribe_realtime(
@@ -819,9 +819,9 @@ class AutoTrader:
                     on_orderbook=self._on_realtime_orderbook,
                 )
             except Exception as exc:
-                logger.warning("[main] S1 동적 종목 구독 실패: %s", exc)
+                logger.warning("[main] 단타 동적 종목 구독 실패: %s", exc)
         if removed:
-            logger.info("[S1 동적] 제거: %s", sorted(removed))
+            logger.info("[단타 동적] 제거 %d종목: %s", len(removed), sorted(removed))
 
     def _snap_opening_range_high(self, today_str: str) -> None:
         """09:30 시점 today_high를 종목별로 스냅샷 (S6 돌파 기준선)."""

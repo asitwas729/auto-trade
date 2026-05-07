@@ -1,12 +1,11 @@
 """
 KIS volume-rank API 기반 동적 워치리스트.
 
-S1 단타 종목 선정용. 5분마다 KIS 거래대금/거래량 급증 종목 조회 후
-- prdy_vrss_rate ≥ 500.0 (전일 거래량 대비 5배+)
+모든 단타 전략(S1/S6/S7/S8) 공유. 5분마다 KIS 거래대금 상위 종목 조회 후
 - 가격 1,000~500,000원
 - 최근 20영업일 평균 거래대금 ≥ 1억원
 - 상한가/하한가 도달 제외
-조건 충족 종목 N개를 워치리스트로 반환.
+조건 충족 종목 N개를 워치리스트로 반환 (KIS API가 이미 거래대금 정렬해서 줌).
 """
 from __future__ import annotations
 
@@ -14,15 +13,14 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from config.constants import (
+    INTRADAY_DYNAMIC_INITIAL_SLOTS,
+    INTRADAY_DYNAMIC_MAX_PRICE,
+    INTRADAY_DYNAMIC_MAX_SLOTS,
+    INTRADAY_DYNAMIC_MIN_AVG_AMOUNT,
+    INTRADAY_DYNAMIC_MIN_PRICE,
     KIS_PATH_VOLUME_RANK,
     KIS_TR,
     MARKET_KOSPI,
-    S1_DYNAMIC_INITIAL_SLOTS,
-    S1_DYNAMIC_MAX_SLOTS,
-    S1_DYNAMIC_MAX_PRICE,
-    S1_DYNAMIC_MIN_AVG_AMOUNT,
-    S1_DYNAMIC_MIN_PRICE,
-    S1_DYNAMIC_PRDY_VRSS_RATE_MIN,
 )
 
 if TYPE_CHECKING:
@@ -39,21 +37,22 @@ class DynamicWatchlist:
         self,
         api: "KISApiClient",
         data: "MarketDataCollector",
-        max_slots: int = S1_DYNAMIC_INITIAL_SLOTS,
+        max_slots: int = INTRADAY_DYNAMIC_INITIAL_SLOTS,
     ) -> None:
         self._api = api
         self._data = data
-        self._max_slots = max(1, min(max_slots, S1_DYNAMIC_MAX_SLOTS))
+        self._max_slots = max(1, min(max_slots, INTRADAY_DYNAMIC_MAX_SLOTS))
 
     def set_max_slots(self, n: int) -> None:
-        self._max_slots = max(1, min(n, S1_DYNAMIC_MAX_SLOTS))
+        self._max_slots = max(1, min(n, INTRADAY_DYNAMIC_MAX_SLOTS))
 
     def refresh(self) -> list[dict]:
         """
-        KIS volume-rank API에서 거래대금 급증 종목 조회 → 필터 → 상위 N개 반환.
+        KIS volume-rank API에서 거래대금 상위 종목 조회 → 필터 → 상위 N개 반환.
+        (FID_BLNG_CLS_CODE="1" → 거래대금 상위 정렬)
 
         Returns:
-            list of dict: [{"code", "name", "price", "prdy_vrss_rate"}, ...]
+            list of dict: [{"code", "name", "price", "prdy_vrss_rate", "avg_amount"}, ...]
         """
         try:
             ranked = self._api.get_volume_rank()
@@ -72,18 +71,15 @@ class DynamicWatchlist:
             except (ValueError, TypeError):
                 continue
 
-            # 1. 전일 대비 거래량 비율
-            if prdy_vrss_rate < S1_DYNAMIC_PRDY_VRSS_RATE_MIN:
+            # 1. 가격 범위
+            if not (INTRADAY_DYNAMIC_MIN_PRICE <= price <= INTRADAY_DYNAMIC_MAX_PRICE):
                 continue
-            # 2. 가격 범위
-            if not (S1_DYNAMIC_MIN_PRICE <= price <= S1_DYNAMIC_MAX_PRICE):
-                continue
-            # 3. 상한가/하한가 도달 제외 (KIS 응답 hts_kor_isnm/upbnd_yn 등으로 판단)
+            # 2. 상한가/하한가 도달 제외
             if str(row.get("upbnd_yn", "")) == "Y" or str(row.get("lwbnd_yn", "")) == "Y":
                 continue
-            # 4. 최근 20영업일 평균 거래대금 (parquet 캐시)
+            # 3. 최근 20영업일 평균 거래대금 (parquet 캐시) - 평소 활발한 종목만
             avg_amount = self._get_avg_amount(code)
-            if avg_amount < S1_DYNAMIC_MIN_AVG_AMOUNT:
+            if avg_amount < INTRADAY_DYNAMIC_MIN_AVG_AMOUNT:
                 continue
 
             selected.append({
@@ -98,11 +94,12 @@ class DynamicWatchlist:
 
         if selected:
             codes_str = ", ".join(
-                f"{s['code']}({s['prdy_vrss_rate']:.0f}%)" for s in selected
+                f"{s['code']}({s['name'][:6]})" for s in selected[:10]
             )
             logger.info(
-                "[DynamicWL] 선정 %d종목: %s",
+                "[DynamicWL] 거래대금 상위 %d종목 선정 (top10: %s%s)",
                 len(selected), codes_str,
+                "..." if len(selected) > 10 else "",
             )
         else:
             logger.info("[DynamicWL] 조건 충족 종목 없음")
