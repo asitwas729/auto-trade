@@ -52,8 +52,10 @@ class S1OpenVolatility(BaseStrategy):
         if not self.enabled:
             return None
 
-        # 진입 가능 시간 (09:15 이후)
+        # 진입 가능 시간 (09:15 ~ 09:25)
         if current_time < self._p["entry_after"]:
+            return None
+        if position_qty == 0 and current_time >= self._p["entry_before"]:
             return None
 
         # ── 보유 중이면 EXIT 시그널 검사 ─────────────────────────────
