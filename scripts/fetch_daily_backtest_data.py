@@ -4,23 +4,24 @@
 KIS 분봉 API는 한 번 호출에 30봉만 주므로, 시각을 09:30~15:30까지 30분 간격으로
 13번 호출해서 당일 전체 ~390봉을 수집한다 (중복 제거).
 
-저장 위치:
-- 일자별:   data/ohlcv/minute_archive/{code}_{YYYYMMDD}.csv
-- 누적 마스터: data/ohlcv/{code}_minute_all.csv
-                (재실행 시 같은 날짜 데이터 자동 교체)
+저장 위치 (주차별 분리):
+- 일자별:  data/ohlcv/minute_archive/{code}_{YYYYMMDD}.csv
+- 주차별:  data/ohlcv/weekly/{code}_minute_{YYYY-Www}.csv  ← ISO 주차
+            예: 2026-W19 (2026년 19번째 주, 월~금 5거래일 누적)
+            매주 월요일 자동으로 다음 주 파일 생성됨
 
 사용:
-    # 기본 종목 10개 (장 마감 후)
+    # 기본 10종목
     python scripts/fetch_daily_backtest_data.py
 
     # 특정 종목만
     python scripts/fetch_daily_backtest_data.py --codes 005930,000660
 
-    # 마스터 CSV append 안 하고 일자별 파일만 저장
-    python scripts/fetch_daily_backtest_data.py --no-append-master
+    # 주차별 누적 안 하고 일자별 파일만
+    python scripts/fetch_daily_backtest_data.py --no-append-weekly
 
 GHA mock-trade.yml 의 'Run AutoTrader' 다음 단계로 실행되며,
-data/ohlcv/ 경로가 캐시되어 매일 누적된다.
+data/ohlcv/ 경로가 캐시되어 매일 누적된다 (5일=일주일치 = 한 파일).
 """
 from __future__ import annotations
 
@@ -78,8 +79,8 @@ def parse_args() -> argparse.Namespace:
         help="시장 코드 (J=코스피, Q=코스닥)",
     )
     p.add_argument(
-        "--no-append-master", action="store_true",
-        help="마스터 CSV 누적 안 함 (일자별 파일만)",
+        "--no-append-weekly", action="store_true",
+        help="주차별 CSV 누적 안 함 (일자별 파일만)",
     )
     p.add_argument(
         "--throttle-sec", type=float, default=1.2,
@@ -164,14 +165,24 @@ def save_daily(df: pd.DataFrame, code: str, date_str: str) -> Path:
     return out_path
 
 
-def append_master(df: pd.DataFrame, code: str) -> Path:
-    """마스터 CSV에 append (재실행 안전 — 같은 날짜는 교체)."""
-    out_dir = settings.DATA_DIR / "ohlcv"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    master_path = out_dir / f"{code}_minute_all.csv"
+def append_weekly(df: pd.DataFrame, code: str) -> tuple[Path, str]:
+    """
+    주차별 CSV에 append (ISO 주차 기준 — 월요일~일요일).
+    재실행 안전 — 같은 날짜는 교체.
 
-    if master_path.exists():
-        existing = pd.read_csv(master_path, dtype={"time": str})
+    Returns:
+        (파일 경로, 주차 식별자 'YYYY-Www')
+    """
+    today = datetime.now()
+    iso_year, iso_week, _ = today.isocalendar()
+    week_id = f"{iso_year}-W{iso_week:02d}"
+
+    out_dir = settings.DATA_DIR / "ohlcv" / "weekly"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    weekly_path = out_dir / f"{code}_minute_{week_id}.csv"
+
+    if weekly_path.exists():
+        existing = pd.read_csv(weekly_path, dtype={"time": str})
         new_date = df["date"].iloc[0]
         existing = existing[existing["date"] != new_date]
         combined = pd.concat([existing, df], ignore_index=True)
@@ -179,8 +190,8 @@ def append_master(df: pd.DataFrame, code: str) -> Path:
         combined = df
 
     combined = combined.sort_values(["date", "time"]).reset_index(drop=True)
-    combined.to_csv(master_path, index=False, encoding="utf-8-sig")
-    return master_path
+    combined.to_csv(weekly_path, index=False, encoding="utf-8-sig")
+    return weekly_path, week_id
 
 
 def main() -> None:
@@ -209,14 +220,13 @@ def main() -> None:
             df = normalize_rows(rows, code, prev_close)
 
             daily_path = save_daily(df, code, date_str)
-            master_path = ""
-            master_days = 1
-            if not args.no_append_master:
-                mp = append_master(df, code)
-                master_path = str(mp)
-                # 마스터 일수 카운트
+            week_id = "-"
+            week_days = 1
+            if not args.no_append_weekly:
+                wp, week_id = append_weekly(df, code)
+                # 주차별 누적 일수
                 try:
-                    master_days = pd.read_csv(mp, dtype={"time": str})["date"].nunique()
+                    week_days = pd.read_csv(wp, dtype={"time": str})["date"].nunique()
                 except Exception:
                     pass
 
@@ -225,40 +235,50 @@ def main() -> None:
                 "rows": len(df),
                 "time_range": f"{df['time'].min()}~{df['time'].max()}",
                 "prev_close": prev_close,
-                "master_days": master_days,
+                "week_id": week_id,
+                "week_days": week_days,
                 "status": "OK",
             })
             logger.info(
-                "[%s] ✓ %d봉 (%s ~ %s) | 마스터 %d일 누적",
-                code, len(df), df["time"].min(), df["time"].max(), master_days,
+                "[%s] ✓ %d봉 (%s ~ %s) | %s 누적 %d일/5",
+                code, len(df), df["time"].min(), df["time"].max(),
+                week_id, week_days,
             )
         except Exception as exc:
             logger.error("[%s] ✗ 수집 실패: %s", code, exc)
             results.append({
                 "code": code, "rows": 0, "time_range": "",
-                "prev_close": 0, "master_days": 0, "status": f"FAIL: {exc}",
+                "prev_close": 0, "week_id": "-", "week_days": 0,
+                "status": f"FAIL: {exc}",
             })
 
     # ── 요약 출력 ────────────────────────────────────────────────────
     print()
-    print("=" * 90)
+    print("=" * 95)
     print(f"수집 완료: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 날짜={date_str}")
-    print("=" * 90)
-    print(f"{'종목':<10}{'봉수':<8}{'시간범위':<20}{'전일종가':<12}{'마스터일수':<12}상태")
-    print("-" * 90)
+    print("=" * 95)
+    print(f"{'종목':<10}{'봉수':<8}{'시간범위':<20}{'전일종가':<12}{'주차':<12}{'주차일수':<10}상태")
+    print("-" * 95)
     for r in results:
         print(
             f"{r['code']:<10}{r['rows']:<8}{r['time_range']:<20}"
-            f"{r['prev_close']:<12,}{r['master_days']:<12}{r['status']}"
+            f"{r['prev_close']:<12,}{r['week_id']:<12}{r['week_days']:<10}{r['status']}"
         )
-    print("=" * 90)
+    print("=" * 95)
 
     success = sum(1 for r in results if r["status"] == "OK")
     print(f"성공: {success}/{len(results)}")
+    week_id = next((r["week_id"] for r in results if r["status"] == "OK"), "YYYY-Www")
     print()
-    print("다음 단계 (마스터 CSV로 백테스트):")
-    print(f"  python run_intraday_backtest.py --csv data/ohlcv/{codes[0]}_minute_all.csv "
-          f"--strategy S1 --code {codes[0]}")
+    print(f"다음 단계 (이번 주 누적 데이터로 백테스트):")
+    print(
+        f"  python run_intraday_backtest.py "
+        f"--csv data/ohlcv/weekly/{codes[0]}_minute_{week_id}.csv "
+        f"--strategy S1 --code {codes[0]}"
+    )
+    print()
+    print("주차별 파일 위치: data/ohlcv/weekly/{code}_minute_{YYYY-Www}.csv")
+    print("→ 매주 월요일 자동으로 새 파일 생성, 이전 주 파일은 그대로 보존")
 
 
 if __name__ == "__main__":
