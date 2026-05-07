@@ -60,7 +60,8 @@ def fetch(codes: list[tuple[str, str]], days: int, data_dir: str) -> None:
     cmd = [sys.executable, str(REPO_ROOT / "scripts" / "fetch_minute_naver.py"),
            "--codes", *[c for c, _ in codes],
            "--days", str(days),
-           "--out-dir", data_dir]
+           "--out-dir", data_dir,
+           "--sleep", "0.6"]
     print(">>", " ".join(cmd))
     subprocess.run(cmd, check=False)
 
