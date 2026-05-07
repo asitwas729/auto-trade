@@ -24,8 +24,8 @@ class S1OpenVolatility(BaseStrategy):
     def __init__(self) -> None:
         super().__init__("S1")
         self._p = S1_PARAMS
-        # 진입한 종목의 당일 저가 기록 {code: low}
         self._entry_lows: dict[str, int] = {}
+        self._partial_sold: set[str] = set()  # 1차 익절 완료된 종목
 
     def evaluate(
         self,
@@ -57,6 +57,11 @@ class S1OpenVolatility(BaseStrategy):
             return None
         if position_qty == 0 and current_time >= self._p["entry_before"]:
             return None
+
+        # 포지션 청산 시 상태 초기화
+        if position_qty == 0:
+            self._entry_lows.pop(code, None)
+            self._partial_sold.discard(code)
 
         # ── 보유 중이면 EXIT 시그널 검사 ─────────────────────────────
         if position_qty > 0 and avg_entry_price > 0:
@@ -132,24 +137,25 @@ class S1OpenVolatility(BaseStrategy):
                 quantity=qty, reason="장 마감 청산", strategy="S1", sell_ratio=1.0
             )
 
-        # 익절 1: +1% → 50% 매도
-        if pnl_rate >= self._p["profit_target_1"]:
-            if qty > 1:
-                sell_qty = max(1, qty // 2)
-                logger.info(f"[S1] {name}({code}) 1차 익절 {pnl_rate:.2%}")
-                return StrategySignal(
-                    signal=Signal.SELL, code=code, name=name, price=price,
-                    quantity=sell_qty, reason=f"1차익절{pnl_rate:.2%}",
-                    strategy="S1", sell_ratio=0.5
-                )
-
-        # 익절 2: +2% → 전량 매도
+        # 익절 2: +2% → 전량 매도 (target_1보다 먼저 검사)
         if pnl_rate >= self._p["profit_target_2"]:
             logger.info(f"[S1] {name}({code}) 2차 익절 {pnl_rate:.2%}")
+            self._partial_sold.discard(code)
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=qty, reason=f"2차익절{pnl_rate:.2%}",
                 strategy="S1", sell_ratio=1.0
+            )
+
+        # 익절 1: +1% → 50% 매도 (최초 1회만)
+        if pnl_rate >= self._p["profit_target_1"] and code not in self._partial_sold:
+            sell_qty = max(1, qty // 2)
+            self._partial_sold.add(code)
+            logger.info(f"[S1] {name}({code}) 1차 익절 {pnl_rate:.2%}")
+            return StrategySignal(
+                signal=Signal.SELL, code=code, name=name, price=price,
+                quantity=sell_qty, reason=f"1차익절{pnl_rate:.2%}",
+                strategy="S1", sell_ratio=0.5
             )
 
         # 손절 1: 당일 저가 이탈
