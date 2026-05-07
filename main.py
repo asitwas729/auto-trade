@@ -91,6 +91,8 @@ class AutoTrader:
         # 매매 빈도 제한
         self._last_sell_at: dict[str, datetime] = {}
         self._buy_count_today: dict[str, int] = {}
+        # 전략별 종목당 매수 카운터: {(code, strategy): count}
+        self._buy_count_today_strategy: dict[tuple[str, str], int] = {}
         self._total_buy_count_today: int = 0
         self._buy_limit_warned_today: str = ""
         self._buy_count_date: str = ""
@@ -214,6 +216,7 @@ class AutoTrader:
                 if self._buy_count_date != today_str:
                     self._buy_count_date = today_str
                     self._buy_count_today.clear()
+                    self._buy_count_today_strategy.clear()
                     self._total_buy_count_today = 0
                     self._buy_limit_warned_today = ""
 
@@ -910,6 +913,7 @@ class AutoTrader:
         """
         from config.constants import (
             MAX_BUYS_PER_CODE_PER_DAY,
+            MAX_BUYS_PER_CODE_PER_STRATEGY,
             MAX_TOTAL_BUYS_PER_DAY,
             REBUY_COOLDOWN_SEC,
             STRATEGY_PRIORITY,
@@ -942,6 +946,19 @@ class AutoTrader:
                     return
 
             # ── 3. 종목당 일일 매수 한도 ─────────────────────────────
+            # 3-a. 전략별 한도 (S5/S9는 종목당 1회 등)
+            strat_limit = MAX_BUYS_PER_CODE_PER_STRATEGY.get(
+                signal.strategy, MAX_BUYS_PER_CODE_PER_DAY,
+            )
+            strat_key = (signal.code, signal.strategy)
+            cnt_for_strat = self._buy_count_today_strategy.get(strat_key, 0)
+            if cnt_for_strat >= strat_limit:
+                logger.info(
+                    "[main] %s %s 전략 종목당 한도(%d/%d) 도달 → 매수 스킵",
+                    signal.code, signal.strategy, cnt_for_strat, strat_limit,
+                )
+                return
+            # 3-b. 종목 전체 한도 (모든 전략 합산)
             cnt_for_code = self._buy_count_today.get(signal.code, 0)
             if cnt_for_code >= MAX_BUYS_PER_CODE_PER_DAY:
                 logger.info(
@@ -983,6 +1000,7 @@ class AutoTrader:
             # 가용현금 즉시 차감 + 매수 카운터 증가
             self._portfolio._cash -= required
             self._buy_count_today[signal.code] = cnt_for_code + 1
+            self._buy_count_today_strategy[strat_key] = cnt_for_strat + 1
             self._total_buy_count_today += 1
         else:
             # 매도: 시그널의 quantity 우선, 없으면 보유 × sell_ratio
