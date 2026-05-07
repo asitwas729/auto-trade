@@ -916,21 +916,27 @@ class AutoTrader:
             MAX_BUYS_PER_CODE_PER_STRATEGY,
             MAX_TOTAL_BUYS_PER_DAY,
             REBUY_COOLDOWN_SEC,
-            STRATEGY_PRIORITY,
         )
         from strategies.base_strategy import Signal as SignalEnum
 
         if signal.signal == SignalEnum.BUY:
-            # ── 1. 우선순위 락 ────────────────────────────────────────
+            # ── 1. 동일 종목 락 (전략 무관하게 1종목 1전략만) ─────────
+            # 다른 전략이 이미 보유 중이면 우선순위 비교 없이 스킵.
+            # (포지션 분리 트래킹이 없는 현재 구조에서 청산 책임이 모호해지는 것을 막음)
             existing = self._portfolio.positions.get(signal.code)
             if existing is not None and existing.quantity > 0:
-                cur_pri = STRATEGY_PRIORITY.get(signal.strategy, 0)
-                ex_pri = STRATEGY_PRIORITY.get(existing.strategy, 0)
-                # 같은 전략이면 정상 (보유 중인 동일 코드 추가 매수는 일반적 X — 전략 evaluate 단계에서 차단)
-                if existing.strategy != signal.strategy and cur_pri <= ex_pri:
+                if existing.strategy != signal.strategy:
                     logger.info(
-                        "[main] %s %s 보유중 → %s 매수 스킵 (분리 트래킹 미구현 한계)",
+                        "[main] %s %s 보유중 → %s 매수 스킵 (cross-strategy 락)",
                         signal.code, existing.strategy, signal.strategy,
+                    )
+                    return
+            # 미체결 매수 주문이 있으면 동일 코드 재진입 차단 (티어 동시발사 방지)
+            if self._order_mgr is not None:
+                if self._order_mgr.pending_buy_qty(signal.code) > 0:
+                    logger.info(
+                        "[main] %s 미체결 매수 존재 → %s 매수 스킵",
+                        signal.code, signal.strategy,
                     )
                     return
 
@@ -1009,6 +1015,23 @@ class AutoTrader:
             )
             if qty <= 0:
                 return
+            # 미체결 매도 주문이 있으면 잔여 보유로 한도 캡 (KIS 40240000 회피)
+            if self._order_mgr is not None:
+                pending = self._order_mgr.pending_sell_qty(signal.code)
+                if pending > 0:
+                    available_qty = max(0, state["position_qty"] - pending)
+                    if available_qty <= 0:
+                        logger.info(
+                            "[main] %s 매도 스킵: 미체결 매도 %d주 / 보유 %d주",
+                            signal.code, pending, state["position_qty"],
+                        )
+                        return
+                    if qty > available_qty:
+                        logger.info(
+                            "[main] %s 매도 수량 캡 %d→%d (미체결 %d주)",
+                            signal.code, qty, available_qty, pending,
+                        )
+                        qty = available_qty
             # 매도 시각 기록 (재매수 쿨다운용)
             self._last_sell_at[signal.code] = datetime.now()
 

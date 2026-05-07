@@ -174,6 +174,18 @@ class OrderManager:
         return self._submit(order)
 
     def _submit(self, order: Order) -> Optional[Order]:
+        # 호가단위 보정: 지정가(>0)에 한해 KOSPI 틱에 맞춰 반올림.
+        # 시장가(0) 및 강제청산은 보정하지 않음.
+        if order.price > 0:
+            adjusted = round_to_tick(order.price)
+            if adjusted != order.price:
+                logger.info(
+                    f"[tick-fix] {order.code} {order.price:,} → {adjusted:,}원"
+                    f" (호가단위 보정)"
+                )
+                order.price = adjusted
+                order.amount = adjusted * order.quantity
+
         if order.side == OrderSide.BUY:
             result: OrderResult = self._api.buy(
                 order.code, order.quantity, order.price
@@ -301,6 +313,22 @@ class OrderManager:
 
     def _cancel_timed_out_orders(self) -> None:
         now = datetime.now()
+
+        # 타임아웃 후보가 하나라도 있으면 우선 체결 동기화 (락 밖에서)
+        # — 이미 체결된 주문에 대한 헛 취소(KIS 40330000)를 줄임.
+        with self._lock:
+            has_candidate = any(
+                o.is_active
+                and o.submitted_at is not None
+                and (now - o.submitted_at).total_seconds() > UNFILLED_ORDER_TIMEOUT_SEC
+                for o in self._active_orders.values()
+            )
+        if has_candidate:
+            try:
+                self.sync_filled_orders()
+            except Exception as exc:
+                logger.warning(f"watchdog 사전 체결조회 실패: {exc}")
+
         with self._lock:
             for order_no, order in list(self._active_orders.items()):
                 if not order.is_active or order.submitted_at is None:
@@ -346,6 +374,24 @@ class OrderManager:
     def get_active_orders(self) -> list[Order]:
         with self._lock:
             return list(self._active_orders.values())
+
+    def pending_sell_qty(self, code: str) -> int:
+        """미체결 매도 주문의 남은 수량 합계 (중복 매도 시그널 차단용)."""
+        with self._lock:
+            return sum(
+                max(0, o.quantity - o.filled_qty)
+                for o in self._active_orders.values()
+                if o.is_active and o.side == OrderSide.SELL and o.code == code
+            )
+
+    def pending_buy_qty(self, code: str) -> int:
+        """미체결 매수 주문의 남은 수량 합계."""
+        with self._lock:
+            return sum(
+                max(0, o.quantity - o.filled_qty)
+                for o in self._active_orders.values()
+                if o.is_active and o.side == OrderSide.BUY and o.code == code
+            )
 
 
 def calc_tick_size(price: int) -> int:
