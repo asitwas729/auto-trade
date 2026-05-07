@@ -104,6 +104,51 @@ def run_intraday_backtest(
     initial_capital: float,
     position_ratio: float,
 ) -> BTResult:
+    # Multi-day data: run per session day, aggregate results, carry cash forward.
+    unique_days = df["date"].astype(str).unique() if "date" in df.columns else []
+    if len(unique_days) > 1:
+        agg = BTResult(strategy=strategy_name)
+        cash_state = initial_capital
+        for day in unique_days:
+            day_df = df[df["date"].astype(str) == day].reset_index(drop=True)
+            if day_df.empty:
+                continue
+            day_result = _run_single_session(
+                df=day_df, strategy_name=strategy_name,
+                code=code, name=name,
+                initial_capital=cash_state, position_ratio=position_ratio,
+            )
+            cash_state += day_result.total_pnl
+            agg.total_pnl += day_result.total_pnl
+            agg.total_trades += day_result.total_trades
+            agg.win_trades += day_result.win_trades
+            agg.loss_trades += day_result.loss_trades
+            agg.trades.extend(day_result.trades)
+        # Recompute aggregate rates from trade log
+        wins = [t.realized_pnl_rate for t in agg.trades if t.side == "SELL" and t.realized_pnl >= 0]
+        losses = [t.realized_pnl_rate for t in agg.trades if t.side == "SELL" and t.realized_pnl < 0]
+        agg.avg_win_rate = sum(wins) / len(wins) if wins else 0.0
+        agg.avg_loss_rate = sum(losses) / len(losses) if losses else 0.0
+        agg.win_rate = agg.win_trades / max(agg.total_trades, 1)
+        agg.expectancy = (
+            agg.win_rate * agg.avg_win_rate
+            - (1 - agg.win_rate) * abs(agg.avg_loss_rate)
+        )
+        return agg
+    return _run_single_session(
+        df=df, strategy_name=strategy_name, code=code, name=name,
+        initial_capital=initial_capital, position_ratio=position_ratio,
+    )
+
+
+def _run_single_session(
+    df: pd.DataFrame,
+    strategy_name: str,
+    code: str,
+    name: str,
+    initial_capital: float,
+    position_ratio: float,
+) -> BTResult:
     # 신규 전략들은 make_bt_func 경로로 처리 (다른 evaluate 시그니처)
     new_strategy_makers = {
         "S6": lambda: S6Breakout(),
