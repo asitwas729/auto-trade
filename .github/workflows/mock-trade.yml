@@ -67,13 +67,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore data cache (sector leaders, token)
+      - name: Restore data cache (sector leaders, token, ohlcv archive)
         uses: actions/cache@v4
         with:
           path: |
             data/sector_leaders_cache.json
             data/.kis_token_mock.json
             data/day_start_eval.json
+            data/ohlcv/
           key: auto-trade-data-${{ github.run_id }}
           restore-keys: |
             auto-trade-data-
@@ -95,6 +96,15 @@ jobs:
         timeout-minutes: 350
         run: python main.py
 
+      - name: Fetch backtest minute data (after market close)
+        # main.py가 15:35에 정상 종료 후 실행. 10종목 × 13페이지 = ~3분.
+        # 1차 잡(08:30~14:30 6h timeout)에서는 main.py가 timeout으로 끊겨서
+        # 이 step도 건너뛸 수 있고, 2차 잡(14:25~)에서는 정상 종료 후 실행됨.
+        if: steps.gate.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: python scripts/fetch_daily_backtest_data.py
+
       - name: Save data cache (always)
         if: always()
         uses: actions/cache/save@v4
@@ -103,6 +113,7 @@ jobs:
             data/sector_leaders_cache.json
             data/.kis_token_mock.json
             data/day_start_eval.json
+            data/ohlcv/
           key: auto-trade-data-${{ github.run_id }}
 
       - name: Upload logs (always)
@@ -113,4 +124,14 @@ jobs:
           path: |
             logs/
           retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload backtest data (always, for local download)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-ohlcv-${{ github.run_id }}
+          path: |
+            data/ohlcv/
+          retention-days: 30
           if-no-files-found: ignore
