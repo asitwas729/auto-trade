@@ -78,6 +78,7 @@ class AutoTrader:
         self._diag_tick_count = 0       # 진단 로그 주기 카운터 (10 tick = 5분)
         self._last_balance_sync = 0.0   # KIS 잔고 마지막 재동기화 시각
         self._day_start_eval = 0.0      # 오늘 시작 평가금액 (오늘 수익률 기준)
+        self._day_start_realized = 0.0  # 오늘 시작 누적실현손익 (오늘 실현손익 기준)
 
         # ─── 시간대별 전략용 상태 ────────────────────────────────────
         # 단타 동적 워치리스트 (거래대금 상위 20). S1/S6/S7/S8 공유.
@@ -1093,7 +1094,7 @@ class AutoTrader:
         return []
 
     def _initialize_day_start(self) -> None:
-        """오늘 시작 평가금액 로드 또는 신규 저장.
+        """오늘 시작 평가금액/실현손익 기준 로드 또는 신규 저장.
         14:25 핸드오프 잡에서도 같은 날짜면 같은 기준값 유지."""
         import json as _json
         today_str = datetime.now().strftime("%Y%m%d")
@@ -1103,9 +1104,10 @@ class AutoTrader:
                 data = _json.loads(cache_path.read_text(encoding="utf-8"))
                 if data.get("date") == today_str:
                     self._day_start_eval = float(data["eval"])
+                    self._day_start_realized = float(data.get("realized", 0.0))
                     logger.info(
-                        "[main] 오늘 시작 평가금액 로드: %.0f원",
-                        self._day_start_eval,
+                        "[main] 오늘 시작 평가금액 로드: %.0f원 (실현 %+.0f)",
+                        self._day_start_eval, self._day_start_realized,
                     )
                     return
         except Exception as exc:
@@ -1113,15 +1115,22 @@ class AutoTrader:
 
         # 신규 저장 (날짜 바뀜 또는 첫 실행)
         self._day_start_eval = float(self._portfolio.total_eval)
+        self._day_start_realized = float(
+            self._portfolio.get_summary().get("total_realized_pnl", 0.0)
+        )
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(
-                _json.dumps({"date": today_str, "eval": self._day_start_eval}),
+                _json.dumps({
+                    "date": today_str,
+                    "eval": self._day_start_eval,
+                    "realized": self._day_start_realized,
+                }),
                 encoding="utf-8",
             )
             logger.info(
-                "[main] 오늘 시작 평가금액 저장: %.0f원",
-                self._day_start_eval,
+                "[main] 오늘 시작 기준 저장: 평가=%.0f원, 실현=%+.0f원",
+                self._day_start_eval, self._day_start_realized,
             )
         except Exception as exc:
             logger.warning(f"[main] day_start 저장 실패: {exc}")
@@ -1129,7 +1138,7 @@ class AutoTrader:
     def _send_daily_report(self) -> None:
         summary = self._portfolio.get_summary()
 
-        # 오늘 수익률 (시작 평가금액 대비)
+        # 오늘 손익 (시작 평가금액 대비 = 실현 + 미실현 합)
         if self._day_start_eval > 0:
             today_pnl = summary["total_eval"] - self._day_start_eval
             summary["today_pnl"] = today_pnl
@@ -1140,14 +1149,30 @@ class AutoTrader:
             summary["today_return_rate"] = 0.0
             summary["day_start_eval"] = 0.0
 
-        # 보유 포지션 상세 (현재 KIS 잔고 = portfolio 동기화 상태)
+        # 오늘 실현손익 = 누적실현 - 오늘 시작 누적실현
+        today_realized = (
+            summary.get("total_realized_pnl", 0.0) - self._day_start_realized
+        )
+        summary["today_realized_pnl"] = today_realized
+        if self._day_start_eval > 0:
+            summary["today_realized_rate"] = today_realized / self._day_start_eval
+            summary["today_unrealized_rate"] = (
+                summary.get("total_unrealized_pnl", 0.0) / self._day_start_eval
+            )
+        else:
+            summary["today_realized_rate"] = 0.0
+            summary["today_unrealized_rate"] = 0.0
+
+        # 보유 포지션 상세 (미실현)
         summary["positions_detail"] = [
             {
                 "code": p.code,
                 "name": p.name,
+                "strategy": p.strategy,
                 "quantity": p.quantity,
                 "avg_price": p.avg_price,
                 "current_price": p.current_price,
+                "unrealized_pnl": p.unrealized_pnl,
                 "pnl_rate": (
                     (p.current_price - p.avg_price) / p.avg_price
                     if p.avg_price > 0 else 0.0
@@ -1156,39 +1181,37 @@ class AutoTrader:
             for p in self._portfolio.positions.values()
         ]
 
-        # 오늘 체결 이력 — KIS 서버에서 직접 조회 (재시작에도 무관)
-        # paper 모드는 _paper.get_filled_orders() 사용
-        today_fills = []
-        if self._order_mgr:  # live mock
-            try:
-                fills = self._api.get_filled_orders()
-                today_fills = [
-                    {
-                        "time": f.filled_at.strftime("%H:%M"),
-                        "code": f.code,
-                        "name": f.name,
-                        "side": f.side,
-                        "qty": f.filled_qty,
-                        "price": f.avg_filled_price,
-                    }
-                    for f in fills
-                ]
-            except Exception as exc:
-                logger.warning("오늘 체결 조회 실패: %s", exc)
-        elif self._paper:
-            today_fills = [
-                {
-                    "time": o.filled_at.strftime("%H:%M") if o.filled_at else "",
-                    "code": o.code,
-                    "name": o.name,
-                    "side": o.side,
-                    "qty": o.quantity,
-                    "price": o.filled_price,
-                }
-                for o in self._paper.get_filled_orders()
-                if o.filled
-            ]
-        summary["today_fills"] = today_fills
+        # 오늘 청산된 거래 (실현손익 포함). _trade_history는 in-memory.
+        today_start_dt = datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        today_trades = self._portfolio.get_trade_history(since=today_start_dt)
+        sells = [t for t in today_trades if t.side == "SELL"]
+        wins = sum(1 for t in sells if t.realized_pnl > 0)
+        losses = sum(1 for t in sells if t.realized_pnl < 0)
+        summary["today_realized_trades"] = [
+            {
+                "time": t.traded_at.strftime("%H:%M"),
+                "code": t.code,
+                "name": t.name,
+                "strategy": t.strategy,
+                "qty": t.quantity,
+                "price": t.price,
+                "realized_pnl": t.realized_pnl,
+                "realized_pnl_rate": t.realized_pnl_rate,
+            }
+            for t in sells
+        ]
+        summary["today_buys_count"] = sum(
+            1 for t in today_trades if t.side == "BUY"
+        )
+        summary["today_wins"] = wins
+        summary["today_losses"] = losses
+
+        # 보유 비중 (현금/주식)
+        total = summary.get("total_eval", 0.0) or 1.0
+        summary["cash_ratio"] = summary.get("cash", 0.0) / total
+        summary["stock_ratio"] = summary.get("invested", 0.0) / total
 
         self._notifier.send_daily_report(summary)
 

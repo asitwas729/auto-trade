@@ -398,6 +398,13 @@ class PortfolioManager:
         with self._lock:
             return self.total_eval * self._weights.get(strategy, 0.0)
 
+    def get_trade_history(self, since: Optional[datetime] = None) -> list[TradeHistory]:
+        """체결 이력 조회. since 지정 시 그 시각 이후만 반환 (오늘 거래 필터용)."""
+        with self._lock:
+            if since is None:
+                return list(self._trade_history)
+            return [t for t in self._trade_history if t.traded_at >= since]
+
     def get_summary(self) -> dict:
         with self._lock:
             total = self.total_eval
@@ -406,6 +413,7 @@ class PortfolioManager:
                 "total_eval": total,
                 "cash": self._cash,
                 "invested": invested,
+                "initial_capital": self._initial_capital,
                 "total_unrealized_pnl": self.total_unrealized_pnl,
                 "total_realized_pnl": self._total_realized_pnl,
                 "total_return_rate": (total - self._initial_capital) / self._initial_capital,
