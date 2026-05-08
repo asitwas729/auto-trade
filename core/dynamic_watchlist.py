@@ -77,10 +77,10 @@ class DynamicWatchlist:
             # 2. 상한가/하한가 도달 제외
             if str(row.get("upbnd_yn", "")) == "Y" or str(row.get("lwbnd_yn", "")) == "Y":
                 continue
-            # 3. 최근 20영업일 평균 거래대금 (parquet 캐시) - 평소 활발한 종목만
+            # 3. 평균 거래대금은 정보용으로만 기록 (필터하지 않음).
+            # KIS volume-rank가 이미 거래대금 상위를 정렬해 주므로, parquet 캐시
+            # 누락 종목도 그대로 통과시켜 워치리스트 비어버리는 문제 회피.
             avg_amount = self._get_avg_amount(code)
-            if avg_amount < INTRADAY_DYNAMIC_MIN_AVG_AMOUNT:
-                continue
 
             selected.append({
                 "code": code,
