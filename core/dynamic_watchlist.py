@@ -2,8 +2,7 @@
 KIS volume-rank API 기반 동적 워치리스트.
 
 모든 단타 전략(S1/S6/S7/S8) 공유. 5분마다 KIS 거래대금 상위 종목 조회 후
-- 가격 1,000~500,000원
-- 최근 20영업일 평균 거래대금 ≥ 1억원
+- 가격 ≥ INTRADAY_DYNAMIC_MIN_PRICE (동전주 회피)
 - 상한가/하한가 도달 제외
 조건 충족 종목 N개를 워치리스트로 반환 (KIS API가 이미 거래대금 정렬해서 줌).
 """
@@ -14,9 +13,7 @@ from typing import TYPE_CHECKING, Optional
 
 from config.constants import (
     INTRADAY_DYNAMIC_INITIAL_SLOTS,
-    INTRADAY_DYNAMIC_MAX_PRICE,
     INTRADAY_DYNAMIC_MAX_SLOTS,
-    INTRADAY_DYNAMIC_MIN_AVG_AMOUNT,
     INTRADAY_DYNAMIC_MIN_PRICE,
     KIS_PATH_VOLUME_RANK,
     KIS_TR,
@@ -71,16 +68,16 @@ class DynamicWatchlist:
             except (ValueError, TypeError):
                 continue
 
-            # 1. 가격 범위
-            if not (INTRADAY_DYNAMIC_MIN_PRICE <= price <= INTRADAY_DYNAMIC_MAX_PRICE):
+            # 1. 가격 하한 (동전주 회피). 상한은 두지 않음.
+            if price < INTRADAY_DYNAMIC_MIN_PRICE:
                 continue
             # 2. 상한가/하한가 도달 제외
             if str(row.get("upbnd_yn", "")) == "Y" or str(row.get("lwbnd_yn", "")) == "Y":
                 continue
-            # 3. 최근 20영업일 평균 거래대금 (parquet 캐시) - 평소 활발한 종목만
+            # 3. 평균 거래대금은 정보용으로만 기록 (필터하지 않음).
+            # KIS volume-rank가 이미 거래대금 상위를 정렬해 주므로, parquet 캐시
+            # 누락 종목도 그대로 통과시켜 워치리스트 비어버리는 문제 회피.
             avg_amount = self._get_avg_amount(code)
-            if avg_amount < INTRADAY_DYNAMIC_MIN_AVG_AMOUNT:
-                continue
 
             selected.append({
                 "code": code,

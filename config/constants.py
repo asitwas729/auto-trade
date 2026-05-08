@@ -199,7 +199,7 @@ INTRADAY_DYNAMIC_REFRESH_SEC = 300        # 5분 갱신
 INTRADAY_DYNAMIC_INITIAL_SLOTS = 20       # 거래대금 상위 20종목
 INTRADAY_DYNAMIC_MAX_SLOTS = 20
 INTRADAY_DYNAMIC_MIN_PRICE = 50000   # 5만원 이상 (1주 단위 분할 효과↑, 동전주 회피)
-INTRADAY_DYNAMIC_MAX_PRICE = 300000  # 30만원 이하 (1억 종목 1주 단위 회피)
+INTRADAY_DYNAMIC_MAX_PRICE = 700000  # 백테스트 데이터 수집 스크립트 전용 (라이브 워치리스트는 상한 미적용)
 INTRADAY_DYNAMIC_MIN_AVG_AMOUNT = 100_000_000  # 1억원
 
 # 하위호환 alias (기존 import 깨지지 않도록)
