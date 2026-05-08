@@ -144,11 +144,17 @@ class Notifier:
         unrealized_rate = summary.get("today_unrealized_rate", 0.0)
         today_rate = summary.get("today_return_rate", 0.0)
 
+        cum_rate = summary.get("total_return_rate", 0.0)
+        initial = summary.get("initial_capital", 0.0)
+        total_eval = summary.get("total_eval", 0.0)
+        cum_pnl = total_eval - initial if initial > 0 else 0.0
+
         lines.append("【손익 요약】")
         lines.append(f"  실현손익     {realized:+,.0f}원  ({realized_rate:+.2%})")
         lines.append(f"  미실현손익   {unrealized:+,.0f}원  ({unrealized_rate:+.2%})")
         lines.append(f"  ─────────────────────────────")
         lines.append(f"  오늘 손익    {today_pnl:+,.0f}원  ({today_rate:+.2%})")
+        lines.append(f"  누적 손익    {cum_pnl:+,.0f}원  ({cum_rate:+.2%})")
 
         # ── 매매 내역 ──────────────────────────────────────────
         sells = summary.get("today_realized_trades", []) or []
@@ -192,18 +198,9 @@ class Notifier:
         lines.append(f"  현금        {cash:>13,.0f}원  ({cash_ratio:.0%})")
         lines.append(f"  주식        {invested:>13,.0f}원  ({stock_ratio:.0%})")
 
-        # ── 누적 ───────────────────────────────────────────────
-        cum_rate = summary.get("total_return_rate", 0.0)
-        initial = summary.get("initial_capital", 0.0)
-        cum_pnl = total_eval - initial if initial > 0 else 0.0
-        lines.append("")
         if initial > 0:
-            lines.append(
-                f"【누적】 {cum_rate:+.2%} (시작자본 {initial:,.0f}원 대비, "
-                f"{cum_pnl:+,.0f}원)"
-            )
-        else:
-            lines.append(f"【누적】 {cum_rate:+.2%} (시작자본 대비)")
+            lines.append("")
+            lines.append(f"  (시작자본 {initial:,.0f}원)")
 
         msg = "\n".join(lines)
         self.send(msg, level="INFO")
