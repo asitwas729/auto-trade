@@ -174,14 +174,18 @@ class OrderManager:
         return self._submit(order)
 
     def _submit(self, order: Order) -> Optional[Order]:
-        # 호가단위 보정: 지정가(>0)에 한해 KOSPI 틱에 맞춰 반올림.
-        # 시장가(0) 및 강제청산은 보정하지 않음.
+        # 호가단위 보정 (side-aware): 매수는 ceil(올림)으로 더 높게,
+        # 매도는 floor(내림)으로 더 낮게 → 마켓 쪽에 한 틱 가까이 두어
+        # 체결률을 높임. 시장가(0)는 보정 안 함.
         if order.price > 0:
-            adjusted = round_to_tick(order.price)
+            if order.side == OrderSide.BUY:
+                adjusted = ceil_to_tick(order.price)
+            else:
+                adjusted = floor_to_tick(order.price)
             if adjusted != order.price:
                 logger.info(
-                    f"[tick-fix] {order.code} {order.price:,} → {adjusted:,}원"
-                    f" (호가단위 보정)"
+                    f"[tick-fix] {order.code} {order.side.value} "
+                    f"{order.price:,} → {adjusted:,}원 (호가단위 보정)"
                 )
                 order.price = adjusted
                 order.amount = adjusted * order.quantity
@@ -406,6 +410,20 @@ def round_to_tick(price: float) -> int:
     """가격을 호가단위에 맞게 반올림"""
     tick = calc_tick_size(int(price))
     return int(round(price / tick) * tick)
+
+
+def ceil_to_tick(price: float) -> int:
+    """매수용: 호가단위 올림 (한 틱 위 → 체결 우선)."""
+    import math
+    tick = calc_tick_size(int(price))
+    return int(math.ceil(price / tick) * tick)
+
+
+def floor_to_tick(price: float) -> int:
+    """매도용: 호가단위 내림 (한 틱 아래 → 체결 우선)."""
+    import math
+    tick = calc_tick_size(int(price))
+    return int(math.floor(price / tick) * tick)
 
 
 def calc_buy_amount(price: int, quantity: int) -> float:

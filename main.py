@@ -41,6 +41,9 @@ _PREMARKET_START_TIME = "0850"
 
 # S5 전략 평가 주기 (초). 매 N초마다 워치리스트 종목 평가
 _STRATEGY_TICK_SEC = 30
+# S6 opening_range 스냅샷 최소 관측 윈도우: 워치 진입 후 N초가 지난 종목만
+# 스냅샷 대상에 포함. 09:30 정시 스냅 외에 1분마다 추가 진입자에 대해 재시도.
+_S6_ORH_MIN_WINDOW_SEC = 30 * 60
 
 # S5 진입 시작 시각 (모의 공격형: 정규장 개장 직후)
 _S5_ENTRY_TIME = "090000"
@@ -85,9 +88,11 @@ class AutoTrader:
         # S5(섹터 멀티데이)는 별도 워치리스트 유지.
         self._intraday_watchlist: set[str] = set()
         self._last_dyn_refresh = 0.0
-        # S6 opening_range_high (09:30 시점 today_high 스냅샷)
+        # S6 opening_range_high (09:30 또는 워치 진입 +30분, 둘 중 늦은 쪽 기준)
         self._opening_range_high: dict[str, int] = {}
         self._opening_range_snapped_today: str = ""
+        # 종목별 워치리스트 진입 시각 — late entrant의 ORH 스냅샷 지연용
+        self._intraday_added_at: dict[str, datetime] = {}
 
         # 매매 빈도 제한
         self._last_sell_at: dict[str, datetime] = {}
@@ -264,11 +269,10 @@ class AutoTrader:
                         name="intraday-dyn-watchlist",
                     ).start()
 
-                # 09:30 시점 opening_range_high 스냅샷 (S6용)
-                if (
-                    "093000" <= time_str < "093100"
-                    and self._opening_range_snapped_today != today_str
-                ):
+                # opening_range_high 스냅샷 (S6용).
+                # 09:30 이후 매 tick에서 호출하되, 종목별로 워치 진입 +30분이
+                # 지난 종목만 스냅. 한 번 잡힌 ORH는 갱신하지 않음.
+                if time_str >= "093000":
                     self._snap_opening_range_high(today_str)
 
                 # 전략 평가 (시간대별 라우팅, _STRATEGY_TICK_SEC 간격)
@@ -813,6 +817,13 @@ class AutoTrader:
 
         self._intraday_watchlist = (self._intraday_watchlist | added) - removed
 
+        now = datetime.now()
+        for c in added:
+            self._intraday_added_at[c] = now
+        for c in removed:
+            self._intraday_added_at.pop(c, None)
+            self._opening_range_high.pop(c, None)
+
         if added:
             logger.info("[단타 동적] 신규 추가 %d종목: %s", len(added), sorted(added))
             self._preload_daily_indicators(list(added))
@@ -828,21 +839,36 @@ class AutoTrader:
             logger.info("[단타 동적] 제거 %d종목: %s", len(removed), sorted(removed))
 
     def _snap_opening_range_high(self, today_str: str) -> None:
-        """09:30 시점 today_high를 종목별로 스냅샷 (S6 돌파 기준선)."""
+        """워치리스트 진입 후 _S6_ORH_MIN_WINDOW_SEC가 지난 종목에 대해
+        today_high를 스냅샷(한 번만). 09:30 첫 호출 후에도 매 tick 재호출되며
+        뒤늦게 진입한 종목은 충분한 관측 윈도우가 쌓이면 그 시점에 스냅됨."""
         codes = self._intraday_candidates()
         if not codes:
             return
+        now = datetime.now()
+        newly_snapped: list[tuple[str, int]] = []
         for code in codes:
+            if code in self._opening_range_high:
+                continue  # 이미 스냅됨
+            added_at = self._intraday_added_at.get(code)
+            # added_at 미상(=어제부터 보유 등) → 09:30부터 즉시 가능 / 신규는 +30분 대기
+            if added_at is not None:
+                elapsed = (now - added_at).total_seconds()
+                if elapsed < _S6_ORH_MIN_WINDOW_SEC:
+                    continue
             today_bar = self._data.get_today_ohlcv(code) or {}
             high = int(today_bar.get("high", 0) or 0)
             if high > 0:
                 self._opening_range_high[code] = high
-        self._opening_range_snapped_today = today_str
-        logger.info(
-            "[main] opening_range_high 스냅샷 (%d종목): %s",
-            len(self._opening_range_high),
-            {k: f"{v:,}" for k, v in list(self._opening_range_high.items())[:5]},
-        )
+                newly_snapped.append((code, high))
+        if newly_snapped:
+            self._opening_range_snapped_today = today_str
+            logger.info(
+                "[main] opening_range_high 스냅샷 +%d종목: %s (누계 %d)",
+                len(newly_snapped),
+                {c: f"{h:,}" for c, h in newly_snapped[:5]},
+                len(self._opening_range_high),
+            )
 
     def _compute_vol_ratio(self, code: str, indicators: dict) -> float:
         """today_volume / vol_ma20 계산 (장중 누적, 시간 비례 보정 X)."""
