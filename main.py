@@ -1082,8 +1082,14 @@ class AutoTrader:
                     price=signal.price,
                 )
             else:
-                # 강제청산 시그널은 시장가로 발주 (reason 기반 판정)
-                forced = "마감" in (signal.reason or "") or "시장가" in (signal.reason or "")
+                # 강제청산/장마감/손절/시장가 키워드 포함 시 시장가 발주.
+                # 지정가로 나가면 mock 호가 부족·체결 실패→타임아웃 취소→재발사
+                # 무한루프 위험이 있어 청산 의도 시그널은 무조건 시장가로 정리.
+                reason = signal.reason or ""
+                forced = any(
+                    kw in reason
+                    for kw in ("마감", "시장가", "강제청산", "청산", "손절", "급등과열")
+                )
                 order = self._order_mgr.place_sell(
                     strategy=signal.strategy,
                     code=signal.code,
