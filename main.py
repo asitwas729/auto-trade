@@ -1103,14 +1103,32 @@ class AutoTrader:
                     price=signal.price,
                 )
             else:
-                # 강제청산/장마감/손절/시장가 키워드 포함 시 시장가 발주.
-                # 지정가로 나가면 mock 호가 부족·체결 실패→타임아웃 취소→재발사
-                # 무한루프 위험이 있어 청산 의도 시그널은 무조건 시장가로 정리.
+                # 청산 의도 시그널은 시장가 발주 (mock 호가 부족 → 타임아웃
+                # 취소 → 재발사 무한루프 차단). is_forced 플래그가 1차 판정,
+                # 키워드 매칭은 구버전 전략 호환용 폴백.
                 reason = signal.reason or ""
-                forced = any(
+                forced = bool(getattr(signal, "is_forced", False)) or any(
                     kw in reason
-                    for kw in ("마감", "시장가", "강제청산", "청산", "손절", "급등과열")
+                    for kw in (
+                        "마감", "시장가", "강제청산", "청산", "손절",
+                        "급등과열", "트레일", "추세파괴", "돌파실패",
+                        "재테스트", "이탈", "시간손절",
+                    )
                 )
+                # forced=True (손절/마감 등 즉시 청산)일 때는 기존 미체결
+                # SELL(부분익절 limit 등)을 먼저 취소해 전량 시장가로 정리.
+                # S1 1차익절 limit 미체결 + 손절 도달 시나리오에서 잔량 잔존 방지.
+                if forced:
+                    cancelled = self._order_mgr.cancel_pending_sells(
+                        signal.code, reason=f"강제청산 우선({signal.strategy})"
+                    )
+                    if cancelled > 0:
+                        logger.info(
+                            "[main] %s 강제청산 전 미체결 SELL %d건 취소",
+                            signal.code, cancelled,
+                        )
+                        # 잔량 = 보유 전체 (cancel 후 pending=0 가정)
+                        qty = state["position_qty"]
                 order = self._order_mgr.place_sell(
                     strategy=signal.strategy,
                     code=signal.code,

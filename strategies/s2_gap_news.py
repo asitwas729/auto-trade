@@ -94,7 +94,8 @@ class S2GapNews(BaseStrategy):
             logger.info(f"[S2] {name}({code}) 09:20 청산")
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
-                quantity=qty, reason="시간초과청산", strategy="S2", sell_ratio=1.0
+                quantity=qty, reason="시간초과청산", strategy="S2",
+                sell_ratio=1.0, is_forced=True,
             )
 
         # 익절 +1.2%
@@ -110,7 +111,8 @@ class S2GapNews(BaseStrategy):
             logger.info(f"[S2] {name}({code}) 손절 {pnl_rate:.2%}")
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
-                quantity=qty, reason=f"손절{pnl_rate:.2%}", strategy="S2", sell_ratio=1.0
+                quantity=qty, reason=f"손절{pnl_rate:.2%}", strategy="S2",
+                sell_ratio=1.0, is_forced=True,
             )
 
         return None

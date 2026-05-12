@@ -33,16 +33,28 @@ logger = logging.getLogger(__name__)
 # 거의 없어 S1/S6/S7 같은 돌파·반등 전략이 잡지도 청산하지도 못함.
 # 종목명에 하나라도 포함되면 워치리스트 진입을 차단.
 _EXCLUDE_NAME_KEYWORDS = (
+    # 채권/단기채/MMF형
     "회사채", "단기채", "국공채", "국고채", "은행채", "특수채", "통안채",
     "통화안정", "단기통안", "단기특수", "단기우량", "단기자금", "MMF",
     "CD금리", "KOFR", "초단기", "머니마켓",
+    # ETN — 만기/괴리율 위험으로 단타 부적합
+    "ETN",
 )
+
+# 우선주 종목명 접미사 (보통주와 함께 거래되며 유동성·변동성 패턴 다름).
+_PREFERRED_SUFFIXES = ("우", "우B", "1우", "2우B", "1우B", "2우")
 
 
 def _is_excluded_by_name(name: str) -> bool:
     if not name:
         return False
-    return any(kw in name for kw in _EXCLUDE_NAME_KEYWORDS)
+    if any(kw in name for kw in _EXCLUDE_NAME_KEYWORDS):
+        return True
+    # 우선주: 이름이 위 접미사로 끝나는 경우 (예: 삼성전자우, LG화학우)
+    stripped = name.strip()
+    if any(stripped.endswith(suf) for suf in _PREFERRED_SUFFIXES):
+        return True
+    return False
 
 
 class DynamicWatchlist:

@@ -134,7 +134,7 @@ class S1OpenVolatility(BaseStrategy):
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=qty, reason=f"09:30 강제청산({pnl_rate:.2%})",
-                strategy="S1", sell_ratio=1.0
+                strategy="S1", sell_ratio=1.0, is_forced=True,
             )
 
         # 장 마감 전 강제 청산 (15:20 이후, 안전망)
@@ -142,7 +142,8 @@ class S1OpenVolatility(BaseStrategy):
             logger.info(f"[S1] {name}({code}) 장 마감 전 전량 청산")
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
-                quantity=qty, reason="장 마감 청산", strategy="S1", sell_ratio=1.0
+                quantity=qty, reason="장 마감 청산", strategy="S1",
+                sell_ratio=1.0, is_forced=True,
             )
 
         # 익절 2: +2% → 전량 매도 (target_1보다 먼저 검사)
@@ -172,7 +173,8 @@ class S1OpenVolatility(BaseStrategy):
             logger.info(f"[S1] {name}({code}) 저가 이탈 손절")
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
-                quantity=qty, reason="저가이탈손절", strategy="S1", sell_ratio=1.0
+                quantity=qty, reason="저가이탈손절", strategy="S1",
+                sell_ratio=1.0, is_forced=True,
             )
 
         # 손절 2: -1.5%
@@ -181,7 +183,7 @@ class S1OpenVolatility(BaseStrategy):
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=qty, reason=f"손절{pnl_rate:.2%}",
-                strategy="S1", sell_ratio=1.0
+                strategy="S1", sell_ratio=1.0, is_forced=True,
             )
 
         return None

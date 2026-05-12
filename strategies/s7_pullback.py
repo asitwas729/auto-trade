@@ -28,6 +28,8 @@ class S7Pullback(BaseStrategy):
         self._p = S7_PARAMS
         # 진입 시각 (90분 시간 손절용)
         self._entry_times: dict[str, datetime] = {}
+        # 당일 진입 시그널 dedup ({code: yyyymmdd})
+        self._signaled_today: dict[str, str] = {}
 
     def evaluate(
         self,
@@ -96,8 +98,14 @@ class S7Pullback(BaseStrategy):
         if vol_ratio < self._p["min_vol_ratio"]:
             return None
 
+        # 당일 dedup
+        today = (now_dt or datetime.now()).strftime("%Y%m%d")
+        if self._signaled_today.get(code) == today:
+            return None
+
         # 진입 시각 기록
         self._entry_times[code] = now_dt or datetime.now()
+        self._signaled_today[code] = today
         reason = (
             f"S7 눌림목 | 고점{today_high:,} 현재{price:,} "
             f"({pullback_pct:+.2%}) MA20>MA60 vol{vol_ratio:.1f}x up{up_ratio:.0%}"
@@ -151,10 +159,14 @@ class S7Pullback(BaseStrategy):
         return None
 
     def _sell(self, code, name, price, qty, reason, forced=False) -> StrategySignal:
-        logger.info("[S7] SELL: %s %s%s", code, reason, " (forced)" if forced else "")
+        is_forced = forced or any(
+            kw in reason for kw in ("손절", "추세파괴", "시간손절", "마감")
+        )
+        logger.info("[S7] SELL: %s %s%s", code, reason, " (forced)" if is_forced else "")
         sig = StrategySignal(
             signal=Signal.SELL, code=code, name=name, price=price,
             quantity=qty, reason=reason, strategy="S7", sell_ratio=1.0,
+            is_forced=is_forced,
         )
         self._entry_times.pop(code, None)
         return sig
