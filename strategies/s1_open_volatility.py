@@ -82,8 +82,8 @@ class S1OpenVolatility(BaseStrategy):
     ) -> Optional[StrategySignal]:
         reasons = []
 
-        # 1. 당일 저점 회복 (모의 공격형: 어떤 반등이든 OK)
-        if price < low:
+        # 1. 당일 저점 회복: bounce > 0 필수 (price == low인 무의미 시그널 차단)
+        if price <= low:
             return None
         bounce_pct = (price - low) / low
         reasons.append(f"저점반등{bounce_pct:.2%}")
