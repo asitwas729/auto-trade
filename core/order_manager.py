@@ -371,6 +371,21 @@ class OrderManager:
             for order in list(self._active_orders.values()):
                 self._cancel_order(order, reason="전체 취소")
 
+    def cancel_pending_sells(self, code: str, reason: str = "강제정리") -> int:
+        """특정 종목의 모든 미체결 매도 주문 즉시 취소.
+        강제청산/손절 시그널 발사 직전에 호출해, 기존 limit 미체결을 정리하고
+        시장가로 잔량을 새로 매도하는 패턴에 사용. 취소된 주문 수 반환."""
+        cancelled = 0
+        with self._lock:
+            targets = [
+                o for o in self._active_orders.values()
+                if o.is_active and o.side == OrderSide.SELL and o.code == code
+            ]
+        for o in targets:
+            self._cancel_order(o, reason=reason)
+            cancelled += 1
+        return cancelled
+
     # ─────────────────────────────────────────────────────────────
     # 유틸
     # ─────────────────────────────────────────────────────────────

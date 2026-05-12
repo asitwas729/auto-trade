@@ -133,7 +133,7 @@ class S3SwingMomentum(BaseStrategy):
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=qty, reason=f"손절{pnl_rate:.2%}",
-                strategy="S3", sell_ratio=1.0
+                strategy="S3", sell_ratio=1.0, is_forced=True,
             )
 
         return None

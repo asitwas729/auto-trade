@@ -102,6 +102,9 @@ class AutoTrader:
         self._total_buy_count_today: int = 0
         self._buy_limit_warned_today: str = ""
         self._buy_count_date: str = ""
+        # 급등과열/장마감 등 "당일 재진입 금지" 청산 후 락된 종목 집합.
+        # 일일 카운터와 함께 자정/날짜 변경 시 초기화.
+        self._no_rebuy_today: set[str] = set()
 
         # 마감 sweep + S9 익일 청산
         self._closeout_sweep_done_today: str = ""
@@ -225,6 +228,7 @@ class AutoTrader:
                     self._buy_count_today_strategy.clear()
                     self._total_buy_count_today = 0
                     self._buy_limit_warned_today = ""
+                    self._no_rebuy_today.clear()
 
                 # S9 보유 종목 익일 시초가 청산 (09:00~09:01 사이 1회)
                 if (
@@ -967,6 +971,14 @@ class AutoTrader:
                     )
                     return
 
+            # ── 1-b. 당일 재진입 금지 종목 (급등과열/장마감 청산 후) ──
+            if signal.code in self._no_rebuy_today:
+                logger.info(
+                    "[main] %s 당일 재진입 금지(과열/마감 청산 이력) → %s 매수 스킵",
+                    signal.code, signal.strategy,
+                )
+                return
+
             # ── 2. 재매수 쿨다운 ─────────────────────────────────────
             last_sell = self._last_sell_at.get(signal.code)
             if last_sell is not None:
@@ -1061,6 +1073,15 @@ class AutoTrader:
                         qty = available_qty
             # 매도 시각 기록 (재매수 쿨다운용)
             self._last_sell_at[signal.code] = datetime.now()
+            # 급등과열 청산 시 당일 재진입 차단 — 30분 쿨다운만으로는 같은
+            # 급등 종목에 즉시 재진입해 손실 보는 패턴(005380 9:03→9:33) 방지.
+            sell_reason = signal.reason or ""
+            if "과열" in sell_reason:
+                self._no_rebuy_today.add(signal.code)
+                logger.info(
+                    "[main] %s 당일 재진입 차단 등록 (사유: %s)",
+                    signal.code, sell_reason[:40],
+                )
 
         side_str = "매수" if signal.signal == SignalEnum.BUY else "매도"
 
@@ -1082,8 +1103,32 @@ class AutoTrader:
                     price=signal.price,
                 )
             else:
-                # 강제청산 시그널은 시장가로 발주 (reason 기반 판정)
-                forced = "마감" in (signal.reason or "") or "시장가" in (signal.reason or "")
+                # 청산 의도 시그널은 시장가 발주 (mock 호가 부족 → 타임아웃
+                # 취소 → 재발사 무한루프 차단). is_forced 플래그가 1차 판정,
+                # 키워드 매칭은 구버전 전략 호환용 폴백.
+                reason = signal.reason or ""
+                forced = bool(getattr(signal, "is_forced", False)) or any(
+                    kw in reason
+                    for kw in (
+                        "마감", "시장가", "강제청산", "청산", "손절",
+                        "급등과열", "트레일", "추세파괴", "돌파실패",
+                        "재테스트", "이탈", "시간손절",
+                    )
+                )
+                # forced=True (손절/마감 등 즉시 청산)일 때는 기존 미체결
+                # SELL(부분익절 limit 등)을 먼저 취소해 전량 시장가로 정리.
+                # S1 1차익절 limit 미체결 + 손절 도달 시나리오에서 잔량 잔존 방지.
+                if forced:
+                    cancelled = self._order_mgr.cancel_pending_sells(
+                        signal.code, reason=f"강제청산 우선({signal.strategy})"
+                    )
+                    if cancelled > 0:
+                        logger.info(
+                            "[main] %s 강제청산 전 미체결 SELL %d건 취소",
+                            signal.code, cancelled,
+                        )
+                        # 잔량 = 보유 전체 (cancel 후 pending=0 가정)
+                        qty = state["position_qty"]
                 order = self._order_mgr.place_sell(
                     strategy=signal.strategy,
                     code=signal.code,

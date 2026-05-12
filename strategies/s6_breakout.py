@@ -26,6 +26,9 @@ class S6Breakout(BaseStrategy):
         self._p = S6_PARAMS
         # 진입 후 최고가 추적 (트레일링용)
         self._entry_highs: dict[str, int] = {}
+        # 당일 진입 시그널 dedup ({code: yyyymmdd}). 동일 종목 매 tick
+        # 같은 시그널 반복 발사를 차단 — main.py 한도와 중복 안전망.
+        self._signaled_today: dict[str, str] = {}
 
     def evaluate(
         self,
@@ -70,6 +73,12 @@ class S6Breakout(BaseStrategy):
         vol_ratio: float,
         up_ratio: float,
     ) -> Optional[StrategySignal]:
+        # 당일 이미 진입 시그널 발사 → 재발사 차단 (dedup)
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y%m%d")
+        if self._signaled_today.get(code) == today:
+            return None
+
         breakout_level = max(prev_day_high or 0, opening_range_high or 0)
         if breakout_level <= 0 or price <= breakout_level:
             return None
@@ -80,8 +89,9 @@ class S6Breakout(BaseStrategy):
         if up_ratio < self._p["min_three_min_up_ratio"]:
             return None
 
-        # 진입 high 초기화
+        # 진입 high 초기화 + dedup 마킹
         self._entry_highs[code] = price
+        self._signaled_today[code] = today
         reason = (
             f"S6 돌파 | level={breakout_level:,} 현재{price:,} "
             f"(+{(price/breakout_level-1)*100:.2f}%) "
@@ -136,10 +146,16 @@ class S6Breakout(BaseStrategy):
         return None
 
     def _sell(self, code, name, price, qty, reason, forced=False) -> StrategySignal:
-        logger.info("[S6] SELL: %s %s%s", code, reason, " (forced)" if forced else "")
+        # 손절/트레일/돌파실패는 즉시 체결 필요 → forced=True (시장가).
+        # 1차/2차 익절만 지정가 유지 (가격 욕심).
+        is_forced = forced or any(
+            kw in reason for kw in ("손절", "트레일", "돌파실패", "재테스트", "마감")
+        )
+        logger.info("[S6] SELL: %s %s%s", code, reason, " (forced)" if is_forced else "")
         sig = StrategySignal(
             signal=Signal.SELL, code=code, name=name, price=price,
             quantity=qty, reason=reason, strategy="S6", sell_ratio=1.0,
+            is_forced=is_forced,
         )
         # 진입 high 캐시 정리
         self._entry_highs.pop(code, None)

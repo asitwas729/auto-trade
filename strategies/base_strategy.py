@@ -24,6 +24,9 @@ class StrategySignal:
     reason: str = ""
     strategy: str = ""
     sell_ratio: float = 1.0   # 매도 비율 (1.0=전량, 0.5=반매도)
+    # True면 시장가로 발주 (손절/트레일/마감/강제청산 등 즉시 체결 필요).
+    # 키워드 매칭 폴백이 main.py에 있지만 명시적 플래그가 더 안전.
+    is_forced: bool = False
 
 
 class BaseStrategy(ABC):

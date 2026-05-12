@@ -24,6 +24,8 @@ class S8AfternoonTrend(BaseStrategy):
         super().__init__("S8")
         self._p = S8_PARAMS
         self._entry_highs: dict[str, int] = {}
+        # 당일 진입 시그널 dedup ({code: yyyymmdd})
+        self._signaled_today: dict[str, str] = {}
 
     def evaluate(
         self,
@@ -75,7 +77,14 @@ class S8AfternoonTrend(BaseStrategy):
         if vol_ratio < self._p["min_vol_ratio"]:
             return None
 
+        # 당일 dedup
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y%m%d")
+        if self._signaled_today.get(code) == today:
+            return None
+
         self._entry_highs[code] = price
+        self._signaled_today[code] = today
         reason = (
             f"S8 오후추세 | 변동{change_rate:+.2%} MA5위 "
             f"vol{vol_ratio:.1f}x up{up_ratio:.0%}"
@@ -116,10 +125,14 @@ class S8AfternoonTrend(BaseStrategy):
         return None
 
     def _sell(self, code, name, price, qty, reason, forced=False) -> StrategySignal:
-        logger.info("[S8] SELL: %s %s%s", code, reason, " (forced)" if forced else "")
+        is_forced = forced or any(
+            kw in reason for kw in ("손절", "트레일", "마감")
+        )
+        logger.info("[S8] SELL: %s %s%s", code, reason, " (forced)" if is_forced else "")
         sig = StrategySignal(
             signal=Signal.SELL, code=code, name=name, price=price,
             quantity=qty, reason=reason, strategy="S8", sell_ratio=1.0,
+            is_forced=is_forced,
         )
         self._entry_highs.pop(code, None)
         return sig
