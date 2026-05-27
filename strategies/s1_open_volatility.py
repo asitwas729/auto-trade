@@ -88,8 +88,9 @@ class S1OpenVolatility(BaseStrategy):
         bounce_pct = (price - low) / low
         reasons.append(f"저점반등{bounce_pct:.2%}")
 
-        # 2. 거래량 증가 (모의 공격형: 0.1x 이상 = 사실상 통과)
-        if vol_ratio < 0.1:
+        # 2. 거래량 증가 (1.0배 이상 필수)
+        min_vol = self._p.get("min_vol_ratio", 1.0)
+        if vol_ratio < min_vol:
             return None
         reasons.append(f"거래량{vol_ratio:.1f}x")
 
@@ -98,10 +99,13 @@ class S1OpenVolatility(BaseStrategy):
             return None
         reasons.append("MA5위")
 
-        # 4. 호가 매수세 우세 (매수호가 수량 > 매도호가 수량 × 1.2)
-        # 모의 공격형 + 호가 미수신 시 자동 PASS
-        if ask_qty_sum > 0 and bid_qty_sum < ask_qty_sum * 1.2:
-            return None
+        # 4. 호가 불균형 60% 이상 (매수호가 / 전체호가)
+        min_imbalance = self._p.get("min_orderbook_imbalance", 0.60)
+        if bid_qty_sum > 0 or ask_qty_sum > 0:
+            total_qty = bid_qty_sum + ask_qty_sum
+            imbalance = bid_qty_sum / total_qty if total_qty > 0 else 0
+            if imbalance < min_imbalance:
+                return None
         reasons.append("매수세우세")
 
         # 5. 전일 종가 대비 급락 아님 (모의 공격형: -15% 이내까지 허용)
@@ -128,9 +132,9 @@ class S1OpenVolatility(BaseStrategy):
     ) -> Optional[StrategySignal]:
         pnl_rate = (price - avg_price) / avg_price
 
-        # 09:30 강제청산 (시초 변동성 끝나는 시점)
+        # 시간 강제청산
         if current_time >= self._p["forced_close"]:
-            logger.info(f"[S1] {name}({code}) 09:30 강제청산 ({pnl_rate:.2%})")
+            logger.info(f"[S1] {name}({code}) {self._p['forced_close'][:2]}:{self._p['forced_close'][2:4]} 강제청산 ({pnl_rate:.2%})")
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=qty, reason=f"09:30 강제청산({pnl_rate:.2%})",
@@ -146,7 +150,22 @@ class S1OpenVolatility(BaseStrategy):
                 sell_ratio=1.0, is_forced=True,
             )
 
-        # 익절 2: +2% → 전량 매도 (target_1보다 먼저 검사)
+        # 09:40 시간기반 트레일: +1%~+2% 구간에서 75% 매도로 수익 보호
+        trail_start = self._p.get("time_trail_start", "094000")
+        trail_ratio = self._p.get("time_trail_partial_ratio", 0.75)
+        if (current_time >= trail_start
+                and self._p["profit_target_1"] <= pnl_rate < self._p["profit_target_2"]
+                and code not in self._partial_sold):
+            sell_qty = max(1, int(qty * trail_ratio))
+            self._partial_sold.add(code)
+            logger.info(f"[S1] {name}({code}) 09:40 시간트레일 {pnl_rate:.2%}")
+            return StrategySignal(
+                signal=Signal.SELL, code=code, name=name, price=price,
+                quantity=sell_qty, reason=f"09:40트레일{pnl_rate:.2%}",
+                strategy="S1", sell_ratio=trail_ratio,
+            )
+
+        # 익절 2: +5% → 전량 매도 (target_1보다 먼저 검사)
         if pnl_rate >= self._p["profit_target_2"]:
             logger.info(f"[S1] {name}({code}) 2차 익절 {pnl_rate:.2%}")
             self._partial_sold.discard(code)

@@ -89,6 +89,13 @@ class S6Breakout(BaseStrategy):
         if up_ratio < self._p["min_three_min_up_ratio"]:
             return None
 
+        # 돌파 품질 점수: 돌파율 × 거래량배율 ≥ min_breakout_quality
+        breakout_pct = (price / breakout_level - 1)
+        quality_score = breakout_pct * vol_ratio
+        min_quality = self._p.get("min_breakout_quality", 0.020)
+        if quality_score < min_quality:
+            return None
+
         # 진입 high 초기화 + dedup 마킹
         self._entry_highs[code] = price
         self._signaled_today[code] = today

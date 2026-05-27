@@ -57,21 +57,26 @@ REBALANCE_LOOKBACK_TRADES = 20      # 최근 N 트레이드 기준
 
 # ─── 전략별 파라미터 ──────────────────────────────────────────────
 S1_PARAMS = {
-    "entry_after":  "091500",       # 09:15 이후 진입 (시초 5분 노이즈 회피)
-    "entry_before": "092500",       # 09:25 이전까지만 신규 진입
-    "forced_close": "093000",       # 09:30 강제청산 (시초 변동성 끝나는 시점)
-    "profit_target_1": 0.015,       # +1.5% 50% 익절 (R:R 1.0)
-    "profit_target_2": 0.030,       # +3.0% 전량 익절 (R:R 2.0, 큰 추세)
+    "entry_after":  "091500",       # 09:15 이후 진입
+    "entry_before": "093000",       # 09:30 이전까지 신규 진입
+    "forced_close": "094500",       # 09:45 강제청산
+    "time_trail_start": "094000",   # 09:40 이후 수익 +1%~+2% 구간 → 75% 매도
+    "time_trail_partial_ratio": 0.75,
+    "profit_target_1": 0.020,       # +2.0% 50% 익절
+    "profit_target_2": 0.050,       # +5.0% 전량 익절
     "stop_loss_low": True,
-    "stop_loss_rate": -0.015,       # -1.5% 빠른 컷
+    "stop_loss_rate": -0.010,       # -1.0% 빠른 컷
+    "min_vol_ratio": 1.0,           # 거래량 1배 이상
+    "min_orderbook_imbalance": 0.60,  # 매수호가 60% 이상 (기존 ~54.5%)
     "intraday_close": True,
 }
 
 S2_PARAMS = {
-    "after_hours_gap": 0.03,        # 시간외 +3% 이상
-    "profit_target": 0.012,         # +1.2%
+    "after_hours_gap": 0.020,       # 시간외 +2% 이상 (Nextrade 복합 신호로 강화)
+    "profit_target_partial": 0.008, # +0.8% 50% 1차 익절
+    "profit_target": 0.018,         # +1.8% 전량 익절 (기존 +1.2%→+1.8%)
     "stop_loss_rate": -0.015,       # -1.5%
-    "cutoff_time": "092000",        # 09:20 이전 청산
+    "cutoff_time": "093000",        # 09:30으로 연장 (기존 09:20)
 }
 
 S3_PARAMS = {
@@ -85,24 +90,24 @@ S3_PARAMS = {
 }
 
 S4_PARAMS = {
-    "atr_high_threshold": 0.025,    # ATR 기준 고변동성
-    "market_advance_decline_min": 0.4,  # 상승 종목 비율 최소
-    "volume_threshold_ratio": 0.7,  # 거래대금 평균 대비 비율
-    "circuit_breaker_drop": -0.02,  # 급락장 기준 -2%
+    "atr_high_threshold": 0.018,        # ATR 고변동성 기준 강화 (0.025→0.018)
+    "market_advance_decline_min": 0.45, # 상승 종목 비율 최소 강화 (0.4→0.45)
+    "volume_threshold_ratio": 0.75,     # 거래대금 기준 강화 (0.7→0.75)
+    "circuit_breaker_drop": -0.015,     # 급락 감지 강화 -1.5% (0.02→0.015)
+    "index_down_threshold": -0.008,     # 지수 -0.8% 이상 하락 시 점수 가산
 }
 
 S5_PARAMS = {
-    # 모의투자 공격형 (실거래 전 백테스트로 재검증 필수)
-    "entry_time": "090000",         # 09:20 → 09:00 (장 개장 즉시)
-    "min_sector_score": 0.1,        # 0.3 → 0.1 (사실상 모든 섹터 통과)
-    "min_vol_ratio": 0.1,           # 2.0 → 0.1 (장중 누적 거래량 부정합 회피)
-    "three_min_up_ratio": 0.3,      # 0.6 → 0.3 (1/3 우상향만 요구)
-    "take_profit": 0.08,            # 0.15 → 0.08 (빠른 익절)
-    "stop_loss": -0.08,             # -0.05 → -0.08 (드로다운 허용)
-    "overheat_rate": 0.30,          # 0.20 → 0.30
-    "weak_hold_days": 5,            # 2 → 5
-    "weak_min_profit": 0.01,        # 0.03 → 0.01
-    "position_ratio": 0.30,         # 0.15 → 0.30 (1회 비중 ↑)
+    "entry_time": "091000",         # 09:10 이후 (시초 노이즈 회피)
+    "min_sector_score": 0.25,       # 섹터 신호 품질 강화 (0.1→0.25)
+    "min_vol_ratio": 1.2,           # 거래량 1.2배 이상 (0.1→1.2, 유동성 보장)
+    "three_min_up_ratio": 0.5,      # 3분봉 절반 이상 우상향 (0.3→0.5)
+    "take_profit": 0.12,            # +12% 익절 (0.08→0.12, 추세 더 포착)
+    "stop_loss": -0.05,             # -5% 손절 (0.08→0.05, 리스크 축소)
+    "overheat_rate": 0.25,          # 과열 기준 25%
+    "weak_hold_days": 3,            # 3일 보유 후 약수익 정리 (5→3)
+    "weak_min_profit": 0.02,        # 약수익 기준 +2% (0.01→0.02)
+    "position_ratio": 0.35,         # 핵심 전략 비중 35% (0.30→0.35)
 }
 
 # ─── 시간대별 신규 전략 (S6/S7/S8/S9) ────────────────────────────
@@ -110,33 +115,39 @@ S5_PARAMS = {
 
 S6_PARAMS = {
     "entry_start": "093000",        # 09:30 (시초 변동성 정리 후)
-    "entry_end": "110000",          # 11:00
-    "min_vol_ratio": 1.5,           # 거래량 1.5배 이상
+    "entry_end": "120000",          # 12:00
+    "min_vol_ratio": 1.5,           # 거래량 스캔 기준
+    "min_candle_vol_ratio": 3.0,    # 돌파 캔들 순간 거래량 5분봉 평균 대비 3배 이상
+    "min_breakout_quality": 0.020,  # 돌파품질: (돌파율) × vol_ratio ≥ 0.02
     "min_three_min_up_ratio": 0.5,
-    "stop_below_or_high_pct": 0.985,    # opening_range_high × 0.985 이탈 손절
-    "stop_loss": -0.02,             # -2% 하드
-    "trail_pullback": 0.02,         # high × 0.98 트레일
-    "take_profit_1": 0.015,         # +1.5% 50% 매도
-    "take_profit_2": 0.035,         # +3.5% 전량
-    "forced_close": "151500",       # 15:15 시장가 강제
+    "stop_below_or_high_pct": 0.988,
+    "stop_loss": -0.010,            # -1.0% 하드 (연구: 타이트 스탑이 효율적)
+    "trail_pullback": 0.012,        # high × 0.988 트레일
+    "take_profit_1": 0.020,         # +2.0% 50% 매도
+    "take_profit_2": 0.050,         # +5.0% 전량
+    "forced_close": "151500",
     "position_ratio": 0.20,
 }
 
 S7_PARAMS = {
-    "entry_start": "100000",        # 10:00
-    "entry_end": "140000",          # 14:00
-    "lunch_start": "113000",        # 점심 신규 진입 차단
+    "entry_start": "093000",
+    "entry_end": "143000",
+    "lunch_start": "113000",
     "lunch_end":   "130000",
-    "uptrend_min_intraday": 0.01,   # today_high > today_open × 1.01
-    "pullback_min_pct": -0.04,      # 너무 깊은 하락은 추세 깨짐
-    "pullback_max_pct": -0.015,     # 너무 얕은 하락은 아직 눌림목 X
+    "uptrend_min_intraday": 0.01,
+    # 눌림목 범위: 소형주(≤10만원) 타이트, 대형주 넓게
+    "pullback_min_pct": -0.025,     # -2.5% (기존 -4.0%, 연구: 코스닥 소형주 0.8~2.5%)
+    "pullback_max_pct": -0.008,     # -0.8% (기존 -1.2%)
+    "pullback_min_pct_large": -0.040,  # 10만원 이상 대형주 범위
+    "pullback_max_pct_large": -0.012,
+    "large_price_threshold": 100000,   # 10만원 기준
     "min_three_min_up_ratio": 0.5,
-    "min_vol_ratio": 1.0,
-    "stop_from_high": -0.05,        # today_high × 0.95 이탈
-    "stop_loss": -0.02,
-    "take_profit_1": 0.01,          # +1% 50%
-    "take_profit_2": 0.025,         # +2.5% 전량
-    "time_stop_min": 90,            # 90분 보유 + 수익<0.3% → 청산
+    "min_vol_ratio": 1.2,
+    "stop_from_high": -0.04,
+    "stop_loss": -0.015,
+    "take_profit_1": 0.020,         # +2.0% (연구: 테마주 반등 평균)
+    "take_profit_2": 0.040,
+    "time_stop_min": 45,            # 45분 (연구: 빠른 자본 재활용)
     "weak_min_profit": 0.003,
     "forced_close": "151500",
     "position_ratio": 0.20,
@@ -145,13 +156,13 @@ S7_PARAMS = {
 S8_PARAMS = {
     "entry_start": "130000",        # 13:00
     "entry_end":   "143000",        # 14:30
-    "min_change_rate": 0.02,        # 당일 +2% 이상
-    "max_change_rate": 0.12,        # 너무 과열된 종목 회피
+    "min_change_rate": 0.015,       # 당일 +1.5% 이상 (0.02→0.015, 기회 확대)
+    "max_change_rate": 0.15,        # 과열 기준 상향 (0.12→0.15)
     "min_three_min_up_ratio": 0.6,
     "min_vol_ratio": 1.5,
-    "trail_pullback": 0.015,        # high × 0.985 트레일
-    "stop_loss": -0.015,
-    "take_profit": 0.02,            # +2% 전량
+    "trail_pullback": 0.012,        # high × 0.988 트레일 (0.015→0.012)
+    "stop_loss": -0.012,            # -1.2% (0.015→0.012)
+    "take_profit": 0.030,           # +3% 전량 (0.02→0.030, 오후 추세 더 포착)
     "forced_close": "145000",       # 14:50 강제 (S9 베팅 전 마감)
     "position_ratio": 0.20,
 }

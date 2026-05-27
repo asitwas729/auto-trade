@@ -1,8 +1,8 @@
 """
 S2. 갭/뉴스/시간외 전략
-- 전일 시간외 +3% 이상
-- 다음날 시초가 또는 09:05 이후 눌림 확인 후 진입
-- +1.2% 익절 또는 09:20 이전 청산
+- 전일 시간외 +2% 이상
+- 09:05 이후 눌림 확인 후 진입
+- +0.8% 50% 1차 익절, +1.8% 전량 익절 또는 09:30 이전 청산
 - -1.5% 손절
 """
 
@@ -22,6 +22,7 @@ class S2GapNews(BaseStrategy):
     def __init__(self) -> None:
         super().__init__("S2")
         self._p = S2_PARAMS
+        self._partial_sold: set[str] = set()
 
     def evaluate(
         self,
@@ -89,26 +90,40 @@ class S2GapNews(BaseStrategy):
     def _check_exit(self, code, name, price, avg_price, qty, current_time) -> Optional[StrategySignal]:
         pnl_rate = (price - avg_price) / avg_price
 
-        # 09:20 이전 강제 청산
+        # 09:30 시간초과 강제 청산
         if current_time >= self._p["cutoff_time"]:
-            logger.info(f"[S2] {name}({code}) 09:20 청산")
+            logger.info(f"[S2] {name}({code}) 시간초과 청산")
+            self._partial_sold.discard(code)
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=qty, reason="시간초과청산", strategy="S2",
                 sell_ratio=1.0, is_forced=True,
             )
 
-        # 익절 +1.2%
+        # 익절 2: +1.8% 전량
         if pnl_rate >= self._p["profit_target"]:
-            logger.info(f"[S2] {name}({code}) 익절 {pnl_rate:.2%}")
+            logger.info(f"[S2] {name}({code}) 2차익절 {pnl_rate:.2%}")
+            self._partial_sold.discard(code)
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
-                quantity=qty, reason=f"익절{pnl_rate:.2%}", strategy="S2", sell_ratio=1.0
+                quantity=qty, reason=f"2차익절{pnl_rate:.2%}", strategy="S2", sell_ratio=1.0
+            )
+
+        # 익절 1: +0.8% 50%
+        partial_target = self._p.get("profit_target_partial", 0.008)
+        if pnl_rate >= partial_target and qty > 1 and code not in self._partial_sold:
+            self._partial_sold.add(code)
+            sell_qty = max(1, qty // 2)
+            logger.info(f"[S2] {name}({code}) 1차익절 {pnl_rate:.2%}")
+            return StrategySignal(
+                signal=Signal.SELL, code=code, name=name, price=price,
+                quantity=sell_qty, reason=f"1차익절{pnl_rate:.2%}", strategy="S2", sell_ratio=0.5
             )
 
         # 손절 -1.5%
         if pnl_rate <= self._p["stop_loss_rate"]:
             logger.info(f"[S2] {name}({code}) 손절 {pnl_rate:.2%}")
+            self._partial_sold.discard(code)
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=qty, reason=f"손절{pnl_rate:.2%}", strategy="S2",
