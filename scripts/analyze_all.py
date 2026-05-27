@@ -116,18 +116,6 @@ def load_gn_score(date_str: str, kw=SECTOR_KEYWORDS) -> dict:
     return score_text(load_news_text(DATA / f"google_news_cache_{date_str.replace('-','')}.json"), kw)
 
 
-def load_yt_legacy(date_str: str) -> dict:
-    """legacy youtube_vs_naver_*.json 의 yt_scores. v1 키워드 기반."""
-    p = DATA / "youtube_vs_naver_20260501.json"
-    if not p.exists():
-        return {}
-    raw = json.loads(p.read_text(encoding="utf-8"))
-    for r in raw.get("results", []):
-        if r["date"] == date_str:
-            return r.get("yt_scores", {})
-    return {}
-
-
 # ─── 종목별 일봉 캐시 로더 ──────────────────────────────────────────
 
 _STOCK_CACHE: dict[str, dict[str, dict]] = {}  # code -> date_yyyymmdd -> {close, volume, ...}
@@ -452,9 +440,6 @@ def main() -> None:
         gn = load_gn_score(d)
         if gn:
             pairs.append((d, gn, "GN"))
-        yt = load_yt_legacy(d)
-        if yt:
-            pairs.append((d, yt, "삼프로(legacy)"))
 
     logger.info("분석 페어: %d (소스×일자)", len(pairs))
 

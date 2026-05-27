@@ -114,10 +114,6 @@ class Settings:
     NAVER_CLIENT_ID: str     = _optional("NAVER_CLIENT_ID")
     NAVER_CLIENT_SECRET: str = _optional("NAVER_CLIENT_SECRET")
 
-    # ─── YouTube Data API (삼프로 VOD 검증 스크립트용) ───────────
-    YOUTUBE_API_KEY: str     = _optional("YOUTUBE_API_KEY")
-    YOUTUBE_CHANNEL_ID: str  = _optional("YOUTUBE_CHANNEL_ID")
-
     # ─── 초기 투자금 ─────────────────────────────────────────────
     INITIAL_CAPITAL: float    = float(_optional("INITIAL_CAPITAL", "10000000"))
 
