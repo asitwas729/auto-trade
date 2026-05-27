@@ -57,22 +57,26 @@ REBALANCE_LOOKBACK_TRADES = 20      # 최근 N 트레이드 기준
 
 # ─── 전략별 파라미터 ──────────────────────────────────────────────
 S1_PARAMS = {
-    "entry_after":  "091500",       # 09:15 이후 진입 (시초 5분 노이즈 회피)
-    "entry_before": "093000",       # 09:30 이전까지 신규 진입 (윈도우 확대)
-    "forced_close": "094500",       # 09:45 강제청산 (추세 더 포착)
+    "entry_after":  "091500",       # 09:15 이후 진입
+    "entry_before": "093000",       # 09:30 이전까지 신규 진입
+    "forced_close": "094500",       # 09:45 강제청산
+    "time_trail_start": "094000",   # 09:40 이후 수익 +1%~+2% 구간 → 75% 매도
+    "time_trail_partial_ratio": 0.75,
     "profit_target_1": 0.020,       # +2.0% 50% 익절
-    "profit_target_2": 0.050,       # +5.0% 전량 익절 (큰 추세 포착)
+    "profit_target_2": 0.050,       # +5.0% 전량 익절
     "stop_loss_low": True,
-    "stop_loss_rate": -0.010,       # -1.0% 빠른 컷 (리스크 축소)
-    "min_vol_ratio": 1.0,           # 거래량 1배 이상 (기존 0.1→1.0)
+    "stop_loss_rate": -0.010,       # -1.0% 빠른 컷
+    "min_vol_ratio": 1.0,           # 거래량 1배 이상
+    "min_orderbook_imbalance": 0.60,  # 매수호가 60% 이상 (기존 ~54.5%)
     "intraday_close": True,
 }
 
 S2_PARAMS = {
-    "after_hours_gap": 0.03,        # 시간외 +3% 이상
-    "profit_target": 0.012,         # +1.2%
+    "after_hours_gap": 0.020,       # 시간외 +2% 이상 (Nextrade 복합 신호로 강화)
+    "profit_target_partial": 0.008, # +0.8% 50% 1차 익절
+    "profit_target": 0.018,         # +1.8% 전량 익절 (기존 +1.2%→+1.8%)
     "stop_loss_rate": -0.015,       # -1.5%
-    "cutoff_time": "092000",        # 09:20 이전 청산
+    "cutoff_time": "093000",        # 09:30으로 연장 (기존 09:20)
 }
 
 S3_PARAMS = {
@@ -111,33 +115,39 @@ S5_PARAMS = {
 
 S6_PARAMS = {
     "entry_start": "093000",        # 09:30 (시초 변동성 정리 후)
-    "entry_end": "120000",          # 12:00 (진입 시간 확대 09:30~12:00)
-    "min_vol_ratio": 1.5,           # 거래량 1.5배 이상
+    "entry_end": "120000",          # 12:00
+    "min_vol_ratio": 1.5,           # 거래량 스캔 기준
+    "min_candle_vol_ratio": 3.0,    # 돌파 캔들 순간 거래량 5분봉 평균 대비 3배 이상
+    "min_breakout_quality": 0.020,  # 돌파품질: (돌파율) × vol_ratio ≥ 0.02
     "min_three_min_up_ratio": 0.5,
-    "stop_below_or_high_pct": 0.988,    # opening_range_high × 0.988 이탈 손절
-    "stop_loss": -0.015,            # -1.5% 하드 (0.02→0.015, 손실 축소)
-    "trail_pullback": 0.015,        # high × 0.985 트레일 (0.02→0.015)
-    "take_profit_1": 0.020,         # +2.0% 50% 매도 (0.015→0.020)
-    "take_profit_2": 0.050,         # +5.0% 전량 (0.035→0.050, 추세 포착)
-    "forced_close": "151500",       # 15:15 시장가 강제
+    "stop_below_or_high_pct": 0.988,
+    "stop_loss": -0.010,            # -1.0% 하드 (연구: 타이트 스탑이 효율적)
+    "trail_pullback": 0.012,        # high × 0.988 트레일
+    "take_profit_1": 0.020,         # +2.0% 50% 매도
+    "take_profit_2": 0.050,         # +5.0% 전량
+    "forced_close": "151500",
     "position_ratio": 0.20,
 }
 
 S7_PARAMS = {
-    "entry_start": "093000",        # 09:30 (S6 이후 빠른 진입)
-    "entry_end": "143000",          # 14:30 (진입 시간 확대)
-    "lunch_start": "113000",        # 점심 신규 진입 차단
+    "entry_start": "093000",
+    "entry_end": "143000",
+    "lunch_start": "113000",
     "lunch_end":   "130000",
-    "uptrend_min_intraday": 0.01,   # today_high > today_open × 1.01
-    "pullback_min_pct": -0.04,      # 너무 깊은 하락은 추세 깨짐
-    "pullback_max_pct": -0.012,     # 눌림목 -1.2% 이상 (0.015→0.012, 더 빠른 진입)
+    "uptrend_min_intraday": 0.01,
+    # 눌림목 범위: 소형주(≤10만원) 타이트, 대형주 넓게
+    "pullback_min_pct": -0.025,     # -2.5% (기존 -4.0%, 연구: 코스닥 소형주 0.8~2.5%)
+    "pullback_max_pct": -0.008,     # -0.8% (기존 -1.2%)
+    "pullback_min_pct_large": -0.040,  # 10만원 이상 대형주 범위
+    "pullback_max_pct_large": -0.012,
+    "large_price_threshold": 100000,   # 10만원 기준
     "min_three_min_up_ratio": 0.5,
-    "min_vol_ratio": 1.2,           # 거래량 기준 상향 (1.0→1.2)
-    "stop_from_high": -0.04,        # today_high × 0.96 이탈 (0.05→0.04)
-    "stop_loss": -0.015,            # -1.5% (0.02→0.015)
-    "take_profit_1": 0.015,         # +1.5% 50% (0.01→0.015)
-    "take_profit_2": 0.040,         # +4.0% 전량 (0.025→0.040, 추세 포착)
-    "time_stop_min": 60,            # 60분 보유 + 수익<0.3% → 청산 (90→60)
+    "min_vol_ratio": 1.2,
+    "stop_from_high": -0.04,
+    "stop_loss": -0.015,
+    "take_profit_1": 0.020,         # +2.0% (연구: 테마주 반등 평균)
+    "take_profit_2": 0.040,
+    "time_stop_min": 45,            # 45분 (연구: 빠른 자본 재활용)
     "weak_min_profit": 0.003,
     "forced_close": "151500",
     "position_ratio": 0.20,

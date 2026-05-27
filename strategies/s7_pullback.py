@@ -92,9 +92,16 @@ class S7Pullback(BaseStrategy):
         # 당일 고점 형성 (open 대비 +1% 이상 갔던 적)
         if today_open <= 0 or today_high < today_open * (1 + self._p["uptrend_min_intraday"]):
             return None
-        # 눌림목 범위: today_high × 0.96 ≤ price ≤ today_high × 0.985
+        # 눌림목 범위: 가격대에 따라 소형주/대형주 다른 기준 적용
         pullback_pct = (price - today_high) / today_high if today_high > 0 else 0.0
-        if not (self._p["pullback_min_pct"] <= pullback_pct <= self._p["pullback_max_pct"]):
+        large_threshold = self._p.get("large_price_threshold", 100_000)
+        if price >= large_threshold:
+            pb_min = self._p.get("pullback_min_pct_large", self._p["pullback_min_pct"])
+            pb_max = self._p.get("pullback_max_pct_large", self._p["pullback_max_pct"])
+        else:
+            pb_min = self._p["pullback_min_pct"]
+            pb_max = self._p["pullback_max_pct"]
+        if not (pb_min <= pullback_pct <= pb_max):
             return None
         # 3분봉 재반등
         if up_ratio < self._p["min_three_min_up_ratio"]:
