@@ -41,7 +41,7 @@ class KoreanStockEnv(gym.Env):
         position_ratio: float = 0.9,   # 매수 시 가용 현금 비율
     ) -> None:
         super().__init__()
-        self._df = df.reset_index(drop=True)
+        self._df = df.reset_index(drop=True).copy()
         self._initial_capital = initial_capital
         self._position_ratio = position_ratio
 
@@ -76,34 +76,39 @@ class KoreanStockEnv(gym.Env):
         exec_price = max(lower_limit, min(upper_limit, close))
 
         reward = 0.0
+        _invalid_action_penalty = -0.001
 
-        if action == 1 and self._position_qty == 0 and self._cash > 0:
-            # 매수
-            buy_price = round_to_tick(exec_price * (1 + SLIPPAGE_RATE))
-            budget = self._cash * self._position_ratio
-            qty = max(1, int(budget // (buy_price * (1 + COMMISSION_RATE))))
-            fee = buy_price * qty * COMMISSION_RATE
-            cost = buy_price * qty + fee
-            if cost <= self._cash:
-                self._cash -= cost
-                self._position_qty = qty
-                self._avg_price = float(buy_price)
-                self._high_since_entry = buy_price
+        if action == 1:  # BUY
+            if self._position_qty == 0 and self._cash > 0:
+                buy_price = round_to_tick(exec_price * (1 + SLIPPAGE_RATE))
+                budget = self._cash * self._position_ratio
+                qty = max(1, int(budget // (buy_price * (1 + COMMISSION_RATE))))
+                fee = buy_price * qty * COMMISSION_RATE
+                cost = buy_price * qty + fee
+                if cost <= self._cash:
+                    self._cash -= cost
+                    self._position_qty = qty
+                    self._avg_price = float(buy_price)
+                    self._high_since_entry = buy_price
+                    self._holding_days = 0
+            else:
+                # 이미 포지션 보유 중이거나 현금 없을 때 BUY → 패널티
+                reward += _invalid_action_penalty
+
+        elif action == 2:  # SELL
+            if self._position_qty > 0:
+                sell_price = round_to_tick(exec_price * (1 - SLIPPAGE_RATE))
+                fee = sell_price * self._position_qty * COMMISSION_RATE
+                tax = sell_price * self._position_qty * TRANSACTION_TAX_RATE
+                proceed = sell_price * self._position_qty - fee - tax
+                self._cash += proceed
+                self._position_qty = 0
+                self._avg_price = 0.0
+                self._high_since_entry = 0
                 self._holding_days = 0
-
-        elif action == 2 and self._position_qty > 0:
-            # 매도
-            sell_price = round_to_tick(exec_price * (1 - SLIPPAGE_RATE))
-            fee = sell_price * self._position_qty * COMMISSION_RATE
-            tax = sell_price * self._position_qty * TRANSACTION_TAX_RATE
-            proceed = sell_price * self._position_qty - fee - tax
-            realized_pnl = proceed - self._avg_price * self._position_qty
-            reward = realized_pnl / self._initial_capital
-            self._cash += proceed
-            self._position_qty = 0
-            self._avg_price = 0.0
-            self._high_since_entry = 0
-            self._holding_days = 0
+            else:
+                # 포지션 없을 때 SELL → 패널티
+                reward += _invalid_action_penalty
 
         if self._position_qty > 0:
             self._high_since_entry = max(self._high_since_entry, close)
@@ -115,13 +120,13 @@ class KoreanStockEnv(gym.Env):
         if self._position_qty > 0 and self._avg_price > 0:
             unrealized_pnl_rate = (exec_price - self._avg_price) / self._avg_price
 
-        # 미실현 손익 변화도 보상에 포함
+        # 포트폴리오 가치 변화를 단일 보상 소스로 사용 (realized + unrealized 이중 반영 제거)
         value_change = (portfolio_value - self._prev_portfolio_value) / self._initial_capital
-        reward += value_change * 0.1   # 미실현은 가중치 낮게
+        reward += value_change
         self._prev_portfolio_value = portfolio_value
 
         self._step += 1
-        done = self._step >= len(self._df) - 1
+        done = self._step >= len(self._df)
 
         obs = self._get_obs()
         info = {
@@ -149,7 +154,8 @@ class KoreanStockEnv(gym.Env):
         ]}
         indicators["macd_hist"] = float(row.get("macd_hist", 0))
 
-        time_str = str(row.get("time", "090000"))
+        time_val = row.get("time")
+        time_str = str(time_val) if (time_val is not None and str(time_val) != "nan") else None
         return build_feature_vector(
             close=close,
             open_price=float(row["open"]),
