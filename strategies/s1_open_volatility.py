@@ -88,8 +88,9 @@ class S1OpenVolatility(BaseStrategy):
         bounce_pct = (price - low) / low
         reasons.append(f"저점반등{bounce_pct:.2%}")
 
-        # 2. 거래량 증가 (모의 공격형: 0.1x 이상 = 사실상 통과)
-        if vol_ratio < 0.1:
+        # 2. 거래량 증가 (1.0배 이상 필수)
+        min_vol = self._p.get("min_vol_ratio", 1.0)
+        if vol_ratio < min_vol:
             return None
         reasons.append(f"거래량{vol_ratio:.1f}x")
 
@@ -128,9 +129,9 @@ class S1OpenVolatility(BaseStrategy):
     ) -> Optional[StrategySignal]:
         pnl_rate = (price - avg_price) / avg_price
 
-        # 09:30 강제청산 (시초 변동성 끝나는 시점)
+        # 시간 강제청산
         if current_time >= self._p["forced_close"]:
-            logger.info(f"[S1] {name}({code}) 09:30 강제청산 ({pnl_rate:.2%})")
+            logger.info(f"[S1] {name}({code}) {self._p['forced_close'][:2]}:{self._p['forced_close'][2:4]} 강제청산 ({pnl_rate:.2%})")
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=qty, reason=f"09:30 강제청산({pnl_rate:.2%})",

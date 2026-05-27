@@ -26,10 +26,14 @@ class S7Pullback(BaseStrategy):
     def __init__(self) -> None:
         super().__init__("S7")
         self._p = S7_PARAMS
-        # 진입 시각 (90분 시간 손절용)
+        # 진입 시각 (시간 손절용)
         self._entry_times: dict[str, datetime] = {}
         # 당일 진입 시그널 dedup ({code: yyyymmdd})
         self._signaled_today: dict[str, str] = {}
+        # 트레일링용 최고가
+        self._high_since_entry: dict[str, int] = {}
+        # 1차 익절 완료 추적
+        self._partial_sold: set[str] = set()
 
     def evaluate(
         self,
@@ -129,27 +133,38 @@ class S7Pullback(BaseStrategy):
     ) -> Optional[StrategySignal]:
         pnl_rate = (price - avg_price) / avg_price if avg_price > 0 else 0.0
 
+        # 트레일링 최고가 갱신
+        prev_high = self._high_since_entry.get(code, int(avg_price))
+        self._high_since_entry[code] = max(prev_high, price)
+        high_since_entry = self._high_since_entry[code]
+
         # 1. 15:15 시장가 강제 청산
         if current_time >= self._p["forced_close"]:
             return self._sell(code, name, price, qty, "S7 마감 시장가", forced=True)
-        # 2. 추세 깨짐 (today_high × 0.95 이탈)
+        # 2. 추세 깨짐 (today_high × 0.96 이탈)
         if today_high > 0 and price < today_high * (1 + self._p["stop_from_high"]):
             return self._sell(code, name, price, qty, f"S7 추세파괴 {pnl_rate:+.2%}")
-        # 3. 하드 손절 -2%
+        # 3. 하드 손절 -1.5%
         if pnl_rate <= self._p["stop_loss"]:
             return self._sell(code, name, price, qty, f"S7 손절 {pnl_rate:+.2%}")
-        # 4. 2차 익절
+        # 4. 트레일링: 1차 익절 이후 고점 대비 -2% 이탈
+        if code in self._partial_sold and high_since_entry > 0:
+            trail_pct = (price - high_since_entry) / high_since_entry
+            if trail_pct <= -0.02:
+                return self._sell(code, name, price, qty, f"S7 트레일 {pnl_rate:+.2%} (고점대비{trail_pct:.1%})")
+        # 5. 2차 익절 +4%
         if pnl_rate >= self._p["take_profit_2"]:
             return self._sell(code, name, price, qty, f"S7 2차익절 {pnl_rate:+.2%}")
-        # 5. 1차 익절
-        if pnl_rate >= self._p["take_profit_1"] and qty > 1:
+        # 6. 1차 익절 +1.5% 50%
+        if pnl_rate >= self._p["take_profit_1"] and qty > 1 and code not in self._partial_sold:
+            self._partial_sold.add(code)
             sell_qty = max(1, qty // 2)
             return StrategySignal(
                 signal=Signal.SELL, code=code, name=name, price=price,
                 quantity=sell_qty, reason=f"S7 1차익절 {pnl_rate:+.2%}",
                 strategy="S7", sell_ratio=0.5,
             )
-        # 6. 시간 손절 (90분 보유 + 수익 < 0.3%)
+        # 7. 시간 손절 (60분 보유 + 수익 < 0.3%)
         entry_dt = self._entry_times.get(code)
         if entry_dt is not None and now_dt is not None:
             held_min = (now_dt - entry_dt).total_seconds() / 60
@@ -160,7 +175,7 @@ class S7Pullback(BaseStrategy):
 
     def _sell(self, code, name, price, qty, reason, forced=False) -> StrategySignal:
         is_forced = forced or any(
-            kw in reason for kw in ("손절", "추세파괴", "시간손절", "마감")
+            kw in reason for kw in ("손절", "추세파괴", "시간손절", "마감", "트레일")
         )
         logger.info("[S7] SELL: %s %s%s", code, reason, " (forced)" if is_forced else "")
         sig = StrategySignal(
@@ -169,6 +184,8 @@ class S7Pullback(BaseStrategy):
             is_forced=is_forced,
         )
         self._entry_times.pop(code, None)
+        self._high_since_entry.pop(code, None)
+        self._partial_sold.discard(code)
         return sig
 
     def make_bt_func(

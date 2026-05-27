@@ -68,11 +68,16 @@ class S4VolatilityFilter(BaseStrategy):
             if vol_ratio < self._p["volume_threshold_ratio"]:
                 score += 1
 
-        # 5. 지수 하락
-        if min_idx < -0.01:
+        # 5. 지수 하락 (강화된 기준 사용)
+        down_threshold = self._p.get("index_down_threshold", -0.008)
+        if min_idx < down_threshold:
             score += 1
 
-        if score >= 4:
+        # 6. 양대 지수 모두 하락
+        if kospi_change_rate < 0 and kosdaq_change_rate < 0:
+            score += 1
+
+        if score >= 3:
             level = MarketRiskLevel.HIGH
         elif score >= 2:
             level = MarketRiskLevel.MEDIUM
