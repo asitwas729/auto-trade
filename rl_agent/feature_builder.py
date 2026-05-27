@@ -5,6 +5,8 @@ PPO action space: 0=HOLD, 1=BUY, 2=SELL (Adilbai/stock-trading-rl-agent 구조 �
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
@@ -74,7 +76,7 @@ def build_feature_vector(
     position_ratio: float,
     unrealized_pnl_rate: float,
     holding_days: int,
-    current_time: str,     # "HHmmss"
+    current_time: Optional[str] = None,  # "HHmmss", None이면 0.5 (일봉 등)
     price_scale: float = 1.0,
 ) -> np.ndarray:
     """
@@ -93,13 +95,16 @@ def build_feature_vector(
     ma20 = indicators.get("ma20", close)
     ma20_ratio = close / ma20 if ma20 > 0 else 1.0
 
-    # 시간 정규화 (09:00~15:30 → 0~1)
-    try:
-        h, m, s = int(current_time[:2]), int(current_time[2:4]), int(current_time[4:6])
-        total_minutes = (h * 60 + m) - 540   # 09:00 = 0
-        time_in_day = max(0.0, min(1.0, total_minutes / 390))   # 6.5시간
-    except (ValueError, IndexError):
+    # 시간 정규화 (09:00~15:30 → 0~1), None이면 0.5 (일봉 또는 시간 정보 없는 데이터)
+    if current_time is None:
         time_in_day = 0.5
+    else:
+        try:
+            h, m = int(current_time[:2]), int(current_time[2:4])
+            total_minutes = (h * 60 + m) - 540   # 09:00 = 0
+            time_in_day = max(0.0, min(1.0, total_minutes / 390))   # 6.5시간
+        except (ValueError, IndexError):
+            time_in_day = 0.5
 
     features = np.array([
         close_norm,
@@ -139,7 +144,7 @@ def build_feature_vector_s5(
     position_ratio: float,
     unrealized_pnl_rate: float,
     holding_days: int,
-    current_time: str,
+    current_time: Optional[str] = None,
     price_scale: float = 1.0,
     # S5 전용 추가 파라미터
     sector_score: float = 0.0,
@@ -179,13 +184,16 @@ def build_feature_vector_s5(
     ma5_gap = (close - ma5) / ma5 if ma5 > 0 else 0.0
     vol_ratio = float(indicators.get("vol_ratio", 1.0))
 
-    # 시간(장 시작 후 경과 분) 계산
-    try:
-        h, m = int(current_time[:2]), int(current_time[2:4])
-        elapsed_min = max(0.0, (h * 60 + m) - 540)   # 09:00 = 0
-        time_since_open = min(1.0, elapsed_min / 390)
-    except (ValueError, IndexError):
-        time_since_open = 0.0
+    # 시간(장 시작 후 경과 분) 계산, None이면 0.5
+    if current_time is None:
+        time_since_open = 0.5
+    else:
+        try:
+            h, m = int(current_time[:2]), int(current_time[2:4])
+            elapsed_min = max(0.0, (h * 60 + m) - 540)   # 09:00 = 0
+            time_since_open = min(1.0, elapsed_min / 390)
+        except (ValueError, IndexError):
+            time_since_open = 0.5
 
     # 당일 등락률 (close vs open)
     intraday_change = (close - open_price) / open_price if open_price > 0 else 0.0

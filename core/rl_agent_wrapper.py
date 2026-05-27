@@ -15,6 +15,13 @@ from typing import Optional
 import numpy as np
 
 from rl_agent.feature_builder import N_ACTIONS, build_feature_vector
+
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
 from strategies.base_strategy import Signal, StrategySignal
 
 logger = logging.getLogger(__name__)
@@ -75,15 +82,30 @@ class RLAgentWrapper:
         if not self._is_loaded or self._model is None:
             return ACTION_HOLD, 0.0
 
+        # obs shape 검증
+        expected_shape = self._model.observation_space.shape
+        if obs.shape != expected_shape:
+            logger.error(f"obs shape 불일치: expected {expected_shape}, got {obs.shape}")
+            return ACTION_HOLD, 0.0
+
         try:
             action, _states = self._model.predict(obs, deterministic=deterministic)
-            # 확률 분포에서 신뢰도 추출
-            import torch
-            with torch.no_grad():
-                obs_tensor = self._model.policy.obs_to_tensor(obs)[0]
-                dist = self._model.policy.get_distribution(obs_tensor)
-                probs = dist.distribution.probs.cpu().numpy()[0]
-            confidence = float(probs[int(action)])
+            confidence = 0.0
+
+            if _TORCH_AVAILABLE:
+                try:
+                    with torch.no_grad():
+                        obs_tensor = self._model.policy.obs_to_tensor(obs)[0]
+                        dist = self._model.policy.get_distribution(obs_tensor)
+                        probs = dist.distribution.probs.cpu().numpy()
+                        if probs.ndim > 1:
+                            probs = probs[0]
+                        action_idx = int(action)
+                        if 0 <= action_idx < len(probs):
+                            confidence = float(probs[action_idx])
+                except Exception as conf_exc:
+                    logger.debug(f"신뢰도 추출 실패 (기본값 0.0 사용): {conf_exc}")
+
             return int(action), confidence
         except Exception as exc:
             logger.error(f"RL predict 오류: {exc}")
