@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 1080" font-family="'Segoe UI', 'Apple SD Gothic Neo', sans-serif">
+  <defs>
+    <style>
+      .title { font-size: 20px; font-weight: 700; fill: #1f2937; }
+      .group-title { font-size: 16px; font-weight: 700; fill: #111827; }
+      .box-title { font-size: 14px; font-weight: 600; fill: #111827; }
+      .box-sub { font-size: 11px; fill: #4b5563; }
+      .tech { font-size: 11px; fill: #374151; font-weight: 500; }
+      .arrow { stroke: #6b7280; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+      .arrow-dash { stroke: #9ca3af; stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+    <linearGradient id="coreGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eff6ff"/><stop offset="100%" stop-color="#dbeafe"/>
+    </linearGradient>
+    <linearGradient id="stratGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fef3c7"/><stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="resGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ede9fe"/><stop offset="100%" stop-color="#ddd6fe"/>
+    </linearGradient>
+    <linearGradient id="execGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#dcfce7"/><stop offset="100%" stop-color="#bbf7d0"/>
+    </linearGradient>
+    <linearGradient id="dataGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffe4e6"/><stop offset="100%" stop-color="#fecdd3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="490" y="34" text-anchor="middle" class="title">Auto-Trade Architecture · 한국주식 자동매매 시스템</text>
+
+  <!-- ============== EXTERNAL: Users / Broker / News ============== -->
+  <g>
+    <!-- Users -->
+    <circle cx="120" cy="100" r="22" fill="#fde68a" stroke="#b45309" stroke-width="1.5"/>
+    <text x="120" y="105" text-anchor="middle" font-size="20">👥</text>
+    <text x="120" y="148" text-anchor="middle" class="box-sub">Trader / CLI</text>
+
+    <!-- Broker API -->
+    <rect x="380" y="70" width="220" height="70" rx="10" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+    <text x="490" y="98" text-anchor="middle" class="box-title">증권사 Open API</text>
+    <text x="490" y="118" text-anchor="middle" class="box-sub">REST · WebSocket · 시세/주문</text>
+    <text x="490" y="133" text-anchor="middle" class="box-sub">requests · aiohttp · websocket-client</text>
+
+    <!-- News source -->
+    <rect x="700" y="70" width="180" height="70" rx="10" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.5"/>
+    <text x="790" y="98" text-anchor="middle" class="box-title">뉴스 소스</text>
+    <text x="790" y="118" text-anchor="middle" class="box-sub">섹터/테마 뉴스 피드</text>
+    <text x="790" y="133" text-anchor="middle" class="box-sub">scripts/news_*</text>
+
+    <!-- GitHub Actions scheduler -->
+    <rect x="60" y="180" width="200" height="60" rx="10" fill="#f3f4f6" stroke="#374151" stroke-width="1.5"/>
+    <text x="160" y="205" text-anchor="middle" class="box-title">⚙ GitHub Actions</text>
+    <text x="160" y="224" text-anchor="middle" class="box-sub">평일 08:30 / 14:25 KST 자동 실행</text>
+  </g>
+
+  <!-- ============== Main System container ============== -->
+  <rect x="40" y="270" width="900" height="640" rx="18" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="60" y="295" class="group-title">main.py · TRADING_MODE 게이트</text>
+
+  <!-- ============== CORE (왼쪽) ============== -->
+  <g>
+    <rect x="70" y="320" width="380" height="280" rx="14" fill="url(#coreGrad)" stroke="#3b82f6" stroke-width="1.8"/>
+    <text x="260" y="348" text-anchor="middle" class="group-title">Core Infrastructure  ·  core/</text>
+
+    <!-- API Client -->
+    <rect x="95" y="370" width="160" height="60" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.4"/>
+    <text x="175" y="392" text-anchor="middle" class="box-title">API Client</text>
+    <text x="175" y="412" text-anchor="middle" class="box-sub">인증 · 시세 · 주문</text>
+
+    <!-- Portfolio Manager -->
+    <rect x="265" y="370" width="160" height="60" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.4"/>
+    <text x="345" y="392" text-anchor="middle" class="box-title">Portfolio Manager</text>
+    <text x="345" y="412" text-anchor="middle" class="box-sub">잔고 · 포지션</text>
+
+    <!-- Risk Manager -->
+    <rect x="95" y="445" width="160" height="60" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.4"/>
+    <text x="175" y="467" text-anchor="middle" class="box-title">Risk Manager</text>
+    <text x="175" y="487" text-anchor="middle" class="box-sub">손절 · 자금배분</text>
+
+    <!-- Order Manager -->
+    <rect x="265" y="445" width="160" height="60" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.4"/>
+    <text x="345" y="467" text-anchor="middle" class="box-title">Order Manager</text>
+    <text x="345" y="487" text-anchor="middle" class="box-sub">호가단위·체결</text>
+
+    <!-- News/Sector Manager -->
+    <rect x="180" y="520" width="160" height="60" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.4"/>
+    <text x="260" y="542" text-anchor="middle" class="box-title">News / Sector</text>
+    <text x="260" y="562" text-anchor="middle" class="box-sub">섹터 점수 · 대장주</text>
+  </g>
+
+  <!-- ============== STRATEGIES (오른쪽 상단) ============== -->
+  <g>
+    <rect x="490" y="320" width="420" height="280" rx="14" fill="url(#stratGrad)" stroke="#d97706" stroke-width="1.8"/>
+    <text x="700" y="348" text-anchor="middle" class="group-title">Strategy Layer  ·  strategies/  (BaseStrategy)</text>
+
+    <!-- 9 strategies grid -->
+    <g font-size="11" fill="#111827">
+      <rect x="510" y="370" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="572" y="390" text-anchor="middle" class="box-title">S1 장초변동성</text>
+      <text x="572" y="408" text-anchor="middle" class="box-sub">09:15~25</text>
+
+      <rect x="645" y="370" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="707" y="390" text-anchor="middle" class="box-title">S2 시간외갭</text>
+      <text x="707" y="408" text-anchor="middle" class="box-sub">장전</text>
+
+      <rect x="780" y="370" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="842" y="390" text-anchor="middle" class="box-title">S3 스윙모멘텀</text>
+      <text x="842" y="408" text-anchor="middle" class="box-sub">주봉</text>
+
+      <rect x="510" y="425" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="572" y="445" text-anchor="middle" class="box-title">S4 변동성필터</text>
+      <text x="572" y="463" text-anchor="middle" class="box-sub">상시</text>
+
+      <rect x="645" y="425" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="707" y="445" text-anchor="middle" class="box-title">S5 뉴스섹터</text>
+      <text x="707" y="463" text-anchor="middle" class="box-sub">장전</text>
+
+      <rect x="780" y="425" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="842" y="445" text-anchor="middle" class="box-title">S6 ORB 돌파</text>
+      <text x="842" y="463" text-anchor="middle" class="box-sub">장초</text>
+
+      <rect x="510" y="480" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="572" y="500" text-anchor="middle" class="box-title">S7 풀백</text>
+      <text x="572" y="518" text-anchor="middle" class="box-sub">장중</text>
+
+      <rect x="645" y="480" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="707" y="500" text-anchor="middle" class="box-title">S8 오후추세</text>
+      <text x="707" y="518" text-anchor="middle" class="box-sub">13:00~</text>
+
+      <rect x="780" y="480" width="125" height="48" rx="6" fill="#fff" stroke="#d97706"/>
+      <text x="842" y="500" text-anchor="middle" class="box-title">S9 종가베팅</text>
+      <text x="842" y="518" text-anchor="middle" class="box-sub">장마감</text>
+    </g>
+
+    <!-- Config -->
+    <rect x="600" y="545" width="200" height="40" rx="6" fill="#fffbeb" stroke="#d97706" stroke-dasharray="3 3"/>
+    <text x="700" y="570" text-anchor="middle" class="box-sub">config/ · 파라미터 · 상수 · ENV</text>
+  </g>
+
+  <!-- ============== DATA LAYER ============== -->
+  <g>
+    <rect x="70" y="625" width="380" height="120" rx="14" fill="url(#dataGrad)" stroke="#e11d48" stroke-width="1.8"/>
+    <text x="260" y="652" text-anchor="middle" class="group-title">Data Layer</text>
+
+    <rect x="95" y="670" width="160" height="60" rx="8" fill="#fff" stroke="#e11d48" stroke-width="1.4"/>
+    <text x="175" y="692" text-anchor="middle" class="box-title">OHLCV Fetcher</text>
+    <text x="175" y="712" text-anchor="middle" class="box-sub">fetch_ohlcv · minute</text>
+
+    <!-- Cylindrical store -->
+    <g>
+      <ellipse cx="345" cy="678" rx="60" ry="10" fill="#fff" stroke="#e11d48" stroke-width="1.4"/>
+      <path d="M285,678 L285,720 A60,10 0 0 0 405,720 L405,678" fill="#fff" stroke="#e11d48" stroke-width="1.4"/>
+      <ellipse cx="345" cy="678" rx="60" ry="10" fill="none" stroke="#e11d48" stroke-width="1.4"/>
+      <text x="345" y="702" text-anchor="middle" class="box-title">Parquet / CSV</text>
+      <text x="345" y="718" text-anchor="middle" class="box-sub">로컬 저장소</text>
+    </g>
+  </g>
+
+  <!-- ============== RESEARCH ============== -->
+  <g>
+    <rect x="490" y="625" width="420" height="120" rx="14" fill="url(#resGrad)" stroke="#7c3aed" stroke-width="1.8"/>
+    <text x="700" y="652" text-anchor="middle" class="group-title">Research</text>
+
+    <rect x="515" y="670" width="180" height="60" rx="8" fill="#fff" stroke="#7c3aed" stroke-width="1.4"/>
+    <text x="605" y="692" text-anchor="middle" class="box-title">Backtester</text>
+    <text x="605" y="712" text-anchor="middle" class="box-sub">수수료·세금·슬리피지</text>
+
+    <rect x="710" y="670" width="180" height="60" rx="8" fill="#fff" stroke="#7c3aed" stroke-width="1.4"/>
+    <text x="800" y="692" text-anchor="middle" class="box-title">RL Agent · PPO</text>
+    <text x="800" y="712" text-anchor="middle" class="box-sub">Gymnasium · SB3 · PyTorch</text>
+  </g>
+
+  <!-- ============== EXECUTION MODE ============== -->
+  <g>
+    <rect x="70" y="770" width="840" height="120" rx="14" fill="url(#execGrad)" stroke="#16a34a" stroke-width="1.8"/>
+    <text x="490" y="797" text-anchor="middle" class="group-title">Execution Mode  ·  TRADING_MODE 게이트  (mock → paper → live)</text>
+
+    <rect x="130" y="815" width="200" height="60" rx="10" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="230" y="838" text-anchor="middle" class="box-title">Mock</text>
+    <text x="230" y="858" text-anchor="middle" class="box-sub">로컬 시뮬레이션</text>
+
+    <rect x="390" y="815" width="200" height="60" rx="10" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="490" y="838" text-anchor="middle" class="box-title">Paper Trading</text>
+    <text x="490" y="858" text-anchor="middle" class="box-sub">실시간 가상 주문 (≥ 2주)</text>
+
+    <rect x="650" y="815" width="200" height="60" rx="10" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="750" y="838" text-anchor="middle" class="box-title">Live</text>
+    <text x="750" y="858" text-anchor="middle" class="box-sub">실거래 (증권사 주문 전송)</text>
+  </g>
+
+  <!-- ============== TECH STACK SIDEBAR ============== -->
+  <g>
+    <rect x="40" y="940" width="900" height="120" rx="14" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>
+    <text x="60" y="965" class="group-title">Tech Stack</text>
+
+    <g transform="translate(60,985)">
+      <rect width="130" height="58" rx="8" fill="#fef3c7" stroke="#d97706"/>
+      <text x="65" y="24" text-anchor="middle" class="box-title">🐍 Python 3.11+</text>
+      <text x="65" y="44" text-anchor="middle" class="tech">pandas · numpy</text>
+    </g>
+    <g transform="translate(200,985)">
+      <rect width="130" height="58" rx="8" fill="#fee2e2" stroke="#dc2626"/>
+      <text x="65" y="24" text-anchor="middle" class="box-title">🔥 PyTorch 2.1+</text>
+      <text x="65" y="44" text-anchor="middle" class="tech">stable-baselines3</text>
+    </g>
+    <g transform="translate(340,985)">
+      <rect width="130" height="58" rx="8" fill="#dcfce7" stroke="#16a34a"/>
+      <text x="65" y="24" text-anchor="middle" class="box-title">🏋 Gymnasium</text>
+      <text x="65" y="44" text-anchor="middle" class="tech">자체 환경 구현</text>
+    </g>
+    <g transform="translate(480,985)">
+      <rect width="130" height="58" rx="8" fill="#e0e7ff" stroke="#4f46e5"/>
+      <text x="65" y="24" text-anchor="middle" class="box-title">📦 Parquet</text>
+      <text x="65" y="44" text-anchor="middle" class="tech">pyarrow</text>
+    </g>
+    <g transform="translate(620,985)">
+      <rect width="130" height="58" rx="8" fill="#f3e8ff" stroke="#7c3aed"/>
+      <text x="65" y="24" text-anchor="middle" class="box-title">🧪 pytest</text>
+      <text x="65" y="44" text-anchor="middle" class="tech">pytest-asyncio</text>
+    </g>
+    <g transform="translate(760,985)">
+      <rect width="160" height="58" rx="8" fill="#f3f4f6" stroke="#374151"/>
+      <text x="80" y="24" text-anchor="middle" class="box-title">⚙ GitHub Actions</text>
+      <text x="80" y="44" text-anchor="middle" class="tech">CI/CD · 정시 스케줄링</text>
+    </g>
+  </g>
+
+  <!-- ============== ARROWS ============== -->
+  <!-- Users → main -->
+  <path class="arrow" d="M120,125 C120,200 160,240 200,275"/>
+  <!-- GH Actions → main -->
+  <path class="arrow" d="M160,240 L200,275"/>
+  <!-- Broker → API Client -->
+  <path class="arrow" d="M430,140 C300,200 200,300 175,370"/>
+  <!-- News → Sector Manager -->
+  <path class="arrow" d="M760,140 C500,250 320,470 320,520"/>
+
+  <!-- API Client → Fetcher -->
+  <path class="arrow" d="M175,430 L175,670"/>
+  <!-- Fetcher → Store -->
+  <path class="arrow" d="M255,700 L285,700"/>
+  <!-- Store → Backtester -->
+  <path class="arrow" d="M405,700 L515,700"/>
+  <!-- Store → RL -->
+  <path class="arrow-dash" d="M405,720 C500,760 650,750 720,730"/>
+
+  <!-- Core flow: API→Portfolio, Strategy→Risk→Portfolio→Order -->
+  <path class="arrow" d="M255,400 L265,400"/>
+  <path class="arrow" d="M255,475 L265,475"/>
+
+  <!-- Strategies → Risk Manager -->
+  <path class="arrow" d="M510,475 L255,475" stroke="#d97706"/>
+  <!-- Sector → Strategies -->
+  <path class="arrow" d="M340,545 C420,500 470,470 510,450"/>
+  <!-- API Client → Strategies (시세) -->
+  <path class="arrow-dash" d="M255,395 C400,395 460,395 510,395"/>
+
+  <!-- Order → Execution modes -->
+  <path class="arrow" d="M345,505 L345,770"/>
+  <path class="arrow" d="M345,790 L230,815"/>
+  <path class="arrow" d="M345,790 L490,815"/>
+  <path class="arrow" d="M345,790 L700,815"/>
+
+  <!-- Live → Broker (back) -->
+  <path class="arrow-dash" d="M850,840 C920,500 700,180 600,120"/>
+
+  <!-- footer -->
+  <text x="490" y="1075" text-anchor="middle" class="box-sub">https://github.com/asitwas729/auto-trade</text>
+</svg>
