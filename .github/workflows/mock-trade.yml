@@ -1,20 +1,21 @@
 name: Auto Trade (mock)
 
 on:
-  schedule:
-    # 한국시간 평일 08:30 = UTC 23:30 일~목 (KST가 UTC보다 +9h)
-    # KST 월 08:30 → UTC 일 23:30
-    # KST 화 08:30 → UTC 월 23:30
-    # ...
-    # KST 금 08:30 → UTC 목 23:30
-    - cron: '30 23 * * 0,1,2,3,4'
-    # 2차 (장 마감 1h 커버용) - GHA 6h 한도로 1차가 14:30경 끊겨서
-    # 14:25 KST = UTC 05:25 월~금에 큐잉. concurrency 설정으로 1차가
-    # 끝나는 즉시 자동 핸드오프되어 15:30까지 거의 끊김 없이 이어짐.
-    - cron: '25 5 * * 1,2,3,4,5'
-  # 수동 실행도 가능
+  # ⚠️ schedule(cron) 트리거는 정시 실행이 보장되지 않음 (인기 시간대 큐 적체로
+  #    개장 단타를 놓치는 일이 잦아 제거). 외부 스케줄러(cron-job.org 등)가
+  #    GitHub API로 workflow_dispatch를 호출 → 거의 즉시 러너 할당.
+  #    오전 세션: 08:20 KST 호출 / 오후 세션: 14:20 KST 호출 (session 입력 구분).
+  #    설정 방법은 docs/external-scheduler.md 참고.
   workflow_dispatch:
     inputs:
+      session:
+        description: '운영 세션 (morning=08:30~10:00 / afternoon=14:30~15:30)'
+        required: false
+        default: 'morning'
+        type: choice
+        options:
+          - morning
+          - afternoon
       log_level:
         description: '로그 레벨 (DEBUG/INFO)'
         required: false
@@ -28,13 +29,15 @@ concurrency:
 jobs:
   trade:
     runs-on: ubuntu-latest
-    # KRX 09:00~15:30 = 6.5h. GHA 단일 잡 한도 6h이므로 마감 전 최대 30분 손실 가능.
-    timeout-minutes: 360
+    # 한 세션 최대 1.5h(오전 08:30~10:00). GHA 6h 한도와 무관 — 넉넉히 120분.
+    timeout-minutes: 120
 
     env:
       TZ: Asia/Seoul
       TRADING_MODE: mock
       INITIAL_CAPITAL: '10000000'
+      # MARKET_START_TIME / MARKET_END_TIME 은 "Resolve session window" 스텝에서
+      # session 입력에 따라 $GITHUB_ENV 로 주입됨.
       LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
       # KIS 자격증명
       KIS_MOCK_APP_KEY: ${{ secrets.KIS_MOCK_APP_KEY }}
@@ -55,6 +58,20 @@ jobs:
       STRATEGY_S5_ENABLED: 'true'
 
     steps:
+      - name: Resolve session window
+        # session 입력(morning/afternoon) → 운영 구간을 $GITHUB_ENV 로 주입.
+        run: |
+          case "${{ github.event.inputs.session || 'morning' }}" in
+            afternoon)
+              echo "MARKET_START_TIME=143000" >> "$GITHUB_ENV"
+              echo "MARKET_END_TIME=153500"   >> "$GITHUB_ENV"
+              echo "세션=오후 (14:30~15:30)" ;;
+            *)
+              echo "MARKET_START_TIME=083000" >> "$GITHUB_ENV"
+              echo "MARKET_END_TIME=100000"   >> "$GITHUB_ENV"
+              echo "세션=오전 (08:30~10:00)" ;;
+          esac
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -91,16 +108,14 @@ jobs:
 
       - name: Run AutoTrader
         if: steps.gate.outcome == 'success'
-        # 14:30 KST 부근에 GHA 6h 한도로 강제 종료될 수 있음. main.py의
-        # SIGTERM 핸들러가 미체결 주문 취소 후 정상 종료 시도.
-        timeout-minutes: 350
+        # MARKET_END_TIME(오전 10:00 / 오후 15:35)에 main.py가 리포트 발송 후
+        # 정상 종료. 비정상 행(hang) 방지용 상한으로 110분.
+        timeout-minutes: 110
         run: python main.py
 
-      - name: Fetch backtest minute data (after market close)
-        # main.py가 15:35에 정상 종료 후 실행.
+      - name: Fetch backtest minute data (after session)
+        # main.py 정상 종료 후 실행 (운영 세션 구간 분봉 수집).
         # 고정 20종목 + 동적 top 5 = 25종목 × 14 calls × 1.2s ≈ 7분.
-        # 1차 잡(08:30~14:30 6h timeout)에서는 main.py가 timeout으로 끊겨서
-        # 이 step도 건너뛸 수 있고, 2차 잡(14:25~)에서는 정상 종료 후 실행됨.
         if: steps.gate.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 15

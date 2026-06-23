@@ -107,6 +107,10 @@ class AutoTrader:
         self._no_rebuy_today: set[str] = set()
 
         # 마감 sweep + S9 익일 청산
+        # 세션 마감 sweep 시각 = MARKET_END_TIME 5분 전 (장중 종료 대비)
+        self._session_sweep_time: str = self._compute_sweep_time(
+            settings.MARKET_END_TIME, lead_sec=300,
+        )
         self._closeout_sweep_done_today: str = ""
         self._s9_overnight_exit_done_today: str = ""
         # 일일 리포트 중복 발송 방지 (15:30 1회 + 마감 종료시 fallback)
@@ -198,18 +202,17 @@ class AutoTrader:
                         name="s5-premarket",
                     ).start()
 
-                # 장 마감 후: 일일 리포트 1회 발송 + 정상 종료
-                # (GHA 6h 타임아웃까지 무한 대기 방지 — 14:25 핸드오프 잡이
-                #  20:30까지 도는 문제 차단)
-                if time_str > "153500":
-                    logger.info("[main] 장 마감 - 정상 종료")
+                # 운영 종료 시각 후: 일일 리포트 1회 발송 + 정상 종료
+                # (MARKET_END_TIME으로 제어 — 전일 운영=153500, 단타만=100000)
+                if time_str > settings.MARKET_END_TIME:
+                    logger.info("[main] 운영 종료 시각 도달 - 정상 종료")
                     if self._daily_report_sent_today != today_str:
                         self._send_daily_report()
                         self._daily_report_sent_today = today_str
                     self._running = False
                     break
-                # 장 시작 전: 1분 슬립 후 다시 체크
-                if time_str < "090000":
+                # 운영 시작 전: 1분 슬립 후 다시 체크
+                if time_str < settings.MARKET_START_TIME:
                     time.sleep(60)
                     continue
 
@@ -260,10 +263,12 @@ class AutoTrader:
                         name="balance-resync",
                     ).start()
 
-                # 단타 동적 워치리스트 갱신 (5분 간격, 09:00~14:30)
-                # S1/S6/S7/S8 공유 — 거래대금 상위 20종목
+                # 단타 동적 워치리스트 갱신 (5분 간격).
+                # 운영 시작~마감 동안 갱신하되 15:25 마감 sweep 직전에 멈춤
+                # (sweep 직전 신규 진입 방지). 오후 세션(14:30~)에서도 갱신되어
+                # S1/S9가 종목을 잡을 수 있게 함. S1/S6/S7/S8/S9 공유.
                 if (
-                    "090000" <= time_str < "143000"
+                    settings.MARKET_START_TIME <= time_str < min(settings.MARKET_END_TIME, "152500")
                     and time.monotonic() - self._last_dyn_refresh >= INTRADAY_DYNAMIC_REFRESH_SEC
                 ):
                     self._last_dyn_refresh = time.monotonic()
@@ -317,7 +322,7 @@ class AutoTrader:
                         if self._diag_tick_count % 10 == 0:
                             self._log_eval_diagnostic(time_str)
 
-                # 마감 안전망 sweep (15:25~)
+                # 마감 안전망 sweep (15:25~, KRX 실제 장마감 대비)
                 if (
                     "152500" <= time_str < "152600"
                     and self._closeout_sweep_done_today != today_str
@@ -327,6 +332,21 @@ class AutoTrader:
                         target=self._closeout_sweep,
                         daemon=True,
                         name="closeout-sweep",
+                    ).start()
+
+                # 세션 마감 sweep (MARKET_END_TIME 5분 전).
+                # 오전 세션처럼 장중에 봇을 끄는 경우, 종료 전 단타 포지션을
+                # 시장가 청산. 15:25 sweep과 동일 가드를 공유해 오후 세션에선
+                # 15:25에 이미 돌았으면 중복 실행 안 함.
+                if (
+                    time_str >= self._session_sweep_time
+                    and self._closeout_sweep_done_today != today_str
+                ):
+                    self._closeout_sweep_done_today = today_str
+                    threading.Thread(
+                        target=self._closeout_sweep,
+                        daemon=True,
+                        name="session-closeout-sweep",
                     ).start()
 
                 # 장 마감 전 일일 리포트 (15:30 1회만)
@@ -916,6 +936,17 @@ class AutoTrader:
                 f"{price:,}" if price else "수신X",
                 ma5, ma5_status, vol_ratio, change,
             )
+
+    @staticmethod
+    def _compute_sweep_time(end_hhmmss: str, lead_sec: int = 300) -> str:
+        """MARKET_END_TIME(HHMMSS)에서 lead_sec 앞선 시각(HHMMSS)을 계산.
+        파싱 실패 시 '999999'(비활성)로 폴백해 세션 sweep을 건너뜀."""
+        from datetime import timedelta
+        try:
+            t = datetime.strptime(end_hhmmss, "%H%M%S")
+        except (ValueError, TypeError):
+            return "999999"
+        return (t - timedelta(seconds=lead_sec)).strftime("%H%M%S")
 
     # ─── 전략별 position_ratio 룩업 ─────────────────────────────────
     @staticmethod

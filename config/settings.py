@@ -117,5 +117,14 @@ class Settings:
     # ─── 초기 투자금 ─────────────────────────────────────────────
     INITIAL_CAPITAL: float    = float(_optional("INITIAL_CAPITAL", "10000000"))
 
+    # ─── 운영 구간 (HHMMSS) ──────────────────────────────────────
+    # MARKET_START_TIME 이전엔 대기, MARKET_END_TIME 초과 시 리포트 발송 후
+    # 정상 종료. 짧은 세션을 별도 dispatch로 나눠 운영하기 위한 설정.
+    #   전일 운영         : start=090000, end=153500
+    #   오전 세션(08:30~10:00): start=083000, end=100000
+    #   오후 세션(14:30~15:30): start=143000, end=153500
+    MARKET_START_TIME: str    = _optional("MARKET_START_TIME", "090000")
+    MARKET_END_TIME: str      = _optional("MARKET_END_TIME", "153500")
+
 
 settings = Settings()
